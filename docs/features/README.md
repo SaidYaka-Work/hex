@@ -38,7 +38,9 @@ Remote config (`SAID_AI_CONFIG_URL`, cached as `ai-slot.json`) may change
 `openrouter.ai`, or the placeholder `ai.saidyaka.com`, with no port and no
 userinfo. The signed slot carries a version, `issued_at`, and `expires_at`.
 The signature covers those fields plus the base URL and model. An expired
-slot, or one older than the cached slot, is rejected. The key variable is
+slot is not used. The highest version ever accepted is stored on the cache
+and is not forgotten when that document expires, so an older version is
+rejected even when its own expiry is still in the future. The key variable is
 not in the document: each allowlisted host maps to one baked environment
 variable (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, or `SAID_AI_API_KEY`).
 There is no `SAID_AI_KEY_VARIABLE` override. An unsigned, invalid, or
@@ -50,13 +52,20 @@ place that would hold the key and the model id. It is not deployed.
 
 The model sees the spoken request and any selected text, never the last Talk
 transcript. An utterance that is only an instruction updates the chip and
-pastes nothing. A one-off instruction with no selection is stored for the
-session. The cloud notice is on screen before the first Talk to AI send, and
+pastes nothing. A true one-off, with no "for now" or "always" (for example
+"translate this to Spanish" said once), applies to the current selection and
+is not stored. With nothing selected it pastes nothing and the window says
+there is no text to change yet. A "for now" chip is written to the instruction
+file and is still there after a restart, until the model or the person clears
+it. The cloud notice is on screen before the first Talk to AI send, and
 Continue is what allows that send. The instruction file is re-read when its
 mtime or length changes, so Continue and chips reach a separate settings
 process. If Talk to AI finishes while the notice is still outstanding and
 the window is closed, the HUD says to open Said.ai and the settings process
-is started when its heartbeat is stale. If Said.ai itself is frontmost, or
+is started when its heartbeat is stale. The listener starts that window
+with the `app` argument. On macOS the paste path compares
+`frontmost_bundle_identifier` (`com.saidyaka.said` is this app) and does not
+take a full context snapshot. If Said.ai itself is frontmost, or
 focus moved before the result arrived, the text is copied and the window
 says it can be pasted anywhere. An unreadable focus still copies, with the
 existing notice. `max_tokens` is about three times the estimated input, with

@@ -15,8 +15,9 @@
 //!    the key. The host must be on [`ALLOWED_HOSTS`]. The document carries
 //!    `version`, `issued_at`, `expires_at`, and an ed25519 signature under
 //!    [`SLOT_PUBLIC_KEY`] over those fields plus the base URL and model.
-//!    Unsigned, expired, replayed (older than the cache), or off-list
-//!    documents are ignored. The cache is checked with the same rules.
+//!    Unsigned, expired, replayed (older than the highest version ever
+//!    accepted, even after that document expires), or off-list documents
+//!    are ignored. The cache is checked with the same rules.
 //! 3. `SAID_AI_BASE_URL` and `SAID_AI_MODEL` override that result. The base
 //!    URL still has to be an allowlisted host. There is no key-variable override.
 //!
@@ -144,6 +145,10 @@ struct SlotFile {
     /// Unix seconds. Covered by the signature. An expired document is ignored.
     #[serde(default)]
     expires_at: u64,
+    /// Highest version this cache has accepted. Not part of the signature.
+    /// Kept after the document expires so an older replay cannot return.
+    #[serde(default)]
+    highest_version: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -347,13 +352,12 @@ fn fetch_remote_slot() -> Option<ResolvedSlot> {
 }
 
 /// Accept a remote slot document. `key_variable` is ignored. A document older
-/// than the cached one is ignored so a replay cannot roll the slot back.
+/// than the highest version ever accepted is ignored, including after the
+/// cached document itself has expired.
 fn accept_remote_slot(body: &str) -> Option<ResolvedSlot> {
     let signed = validate_slot_document(body)?;
     #[cfg(not(test))]
-    if let Some(cached) = read_cached_signed()
-        && !slot_supersedes(&signed, &cached)
-    {
+    if !slot_supersedes_watermark(&signed, cached_watermark()) {
         return None;
     }
     #[cfg(not(test))]
@@ -400,9 +404,28 @@ fn validate_slot_document(body: &str) -> Option<SignedSlot> {
 }
 
 /// `true` when `incoming` is the same document or a newer one.
+#[cfg(test)]
 fn slot_supersedes(incoming: &SignedSlot, cached: &SignedSlot) -> bool {
-    incoming.version > cached.version
-        || (incoming.version == cached.version && incoming.issued_at >= cached.issued_at)
+    slot_supersedes_watermark(incoming, Some((cached.version, cached.issued_at)))
+}
+
+/// `true` when there is no remembered version, or `incoming` is that version
+/// or a newer one. Expiry of the cached document does not clear the version.
+fn slot_supersedes_watermark(incoming: &SignedSlot, watermark: Option<(u64, u64)>) -> bool {
+    match watermark {
+        Some((version, issued_at)) => {
+            incoming.version > version
+                || (incoming.version == version && incoming.issued_at >= issued_at)
+        }
+        None => true,
+    }
+}
+
+/// Version and `issued_at` stored in a cache file. The document may be expired.
+fn watermark_from_cache_body(body: &str) -> Option<(u64, u64)> {
+    let file: SlotFile = serde_json::from_str(body).ok()?;
+    let version = file.highest_version.max(file.version);
+    (version > 0).then_some((version, file.issued_at))
 }
 
 fn unix_now() -> u64 {
@@ -487,6 +510,13 @@ fn cached_slot_path() -> PathBuf {
 }
 
 #[cfg(not(test))]
+fn cached_watermark() -> Option<(u64, u64)> {
+    let bytes = std::fs::read(cached_slot_path()).ok()?;
+    let body = String::from_utf8(bytes).ok()?;
+    watermark_from_cache_body(&body)
+}
+
+#[cfg(not(test))]
 fn read_cached_signed() -> Option<SignedSlot> {
     let bytes = std::fs::read(cached_slot_path()).ok()?;
     let body = String::from_utf8(bytes).ok()?;
@@ -508,6 +538,12 @@ fn write_cached_slot(slot: &SignedSlot) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let previous = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|body| watermark_from_cache_body(&body))
+        .map(|(version, _)| version)
+        .unwrap_or(0);
     let bytes = serde_json::json!({
         "base_url": slot.base_url,
         "model": slot.model,
@@ -515,6 +551,7 @@ fn write_cached_slot(slot: &SignedSlot) {
         "issued_at": slot.issued_at,
         "expires_at": slot.expires_at,
         "signature": slot.signature,
+        "highest_version": previous.max(slot.version),
     })
     .to_string()
     .into_bytes();
@@ -1248,9 +1285,28 @@ mod tests {
         assert!(slot_supersedes(&same, &cached));
         let newer = SignedSlot {
             version: 3,
-            ..older
+            ..older.clone()
         };
         assert!(slot_supersedes(&newer, &cached));
+        let expired_cache = r#"{"base_url":"https://openrouter.ai/api/v1","model":"google/gemini-3.5-flash-lite","version":2,"highest_version":2,"issued_at":1000,"expires_at":2000,"signature":"YHAM9qfoQv8qf6JpBY2uYZW4itsbe+JKim7Tx4ipSpY/cwbzxxioQyftCGryclI5Nxb+SFtwC60M7jYd1MK6BQ=="}"#;
+        assert!(validate_slot_document(expired_cache).is_none());
+        let watermark = watermark_from_cache_body(expired_cache).expect("watermark");
+        assert_eq!(watermark, (2, 1000));
+        assert!(!slot_supersedes_watermark(&older, Some(watermark)));
+        assert!(slot_supersedes_watermark(&newer, Some(watermark)));
+        let legacy = r#"{"base_url":"https://openrouter.ai/api/v1","model":"google/gemini-3.5-flash-lite","version":4,"issued_at":50,"expires_at":60,"signature":""}"#;
+        assert_eq!(watermark_from_cache_body(legacy), Some((4, 50)));
+        let remembered = r#"{"base_url":"https://openrouter.ai/api/v1","model":"google/gemini-3.5-flash-lite","version":1,"highest_version":7,"issued_at":9,"expires_at":10,"signature":""}"#;
+        assert_eq!(watermark_from_cache_body(remembered), Some((7, 9)));
+        assert!(!slot_supersedes_watermark(
+            &SignedSlot {
+                version: 6,
+                issued_at: 4_000_000_000,
+                expires_at: 4_102_444_800,
+                ..older
+            },
+            watermark_from_cache_body(remembered),
+        ));
     }
 
     #[test]

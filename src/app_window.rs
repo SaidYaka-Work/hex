@@ -7626,7 +7626,7 @@ impl AppWindow {
                 div()
                     .flex_1()
                     .min_h(px(0.0))
-                    .w_full()
+                    .w(px(HOME_WINDOW_WIDTH))
                     .px_4()
                     .pb_4()
                     .flex()
@@ -7652,6 +7652,7 @@ impl AppWindow {
                                 talk_emphasis,
                                 false,
                                 false,
+                                false,
                                 tr("Talk"),
                                 tr("Stays on this computer"),
                                 talk_hint,
@@ -7664,6 +7665,7 @@ impl AppWindow {
                                 ai_emphasis,
                                 true,
                                 thinking,
+                                show_try,
                                 tr("Talk to AI"),
                                 ai_subtitle,
                                 ai_hint,
@@ -7674,19 +7676,6 @@ impl AppWindow {
                     )
                     .when(!active.is_empty(), |column| {
                         column.child(render_active_instructions(&active, stage != "chips", cx))
-                    })
-                    .when(show_try, |column| {
-                        column.child(
-                            div().w_full().flex().gap_3().child(div().flex_1()).child(
-                                div().flex_1().flex().justify_center().child(
-                                    div()
-                                        .text_caption()
-                                        .text_color(rgb(paint(TEXT_TERTIARY)))
-                                        .text_center()
-                                        .child(tr("Try: \"for now, write formally\"")),
-                                ),
-                            ),
-                        )
                     })
                     .when(downloading, |column| {
                         column.child(
@@ -7981,6 +7970,7 @@ fn home_card(
     emphasis: f32,
     sparkle: bool,
     shimmer: bool,
+    try_hint: bool,
     title: impl IntoElement,
     subtitle: impl IntoElement,
     hint: AnyElement,
@@ -8041,20 +8031,43 @@ fn home_card(
                 } else {
                     (1.0 - phase) * 2.0
                 };
-                card.opacity(0.55 + (0.45 * wave))
+                // A pulsing accent edge. Fading the whole card reads as disabled.
+                card.w_full()
+                    .border_color(mix_color(
+                        rgb(paint(LINE)),
+                        rgb(paint(ACCENT)),
+                        0.35 + (0.65 * wave),
+                    ))
+                    .bg(mix_color(
+                        rgb(paint(SURFACE)),
+                        rgb(paint(ACCENT_SURFACE)),
+                        0.35 + (0.45 * wave),
+                    ))
             },
         )
         .into_any_element()
     } else {
-        card.into_any_element()
+        card.w_full().into_any_element()
     };
     div()
         .flex_1()
+        .min_w(px(0.0))
         .flex()
         .flex_col()
+        .items_center()
         .gap_2()
-        .child(card)
-        .child(hint)
+        .child(div().w_full().child(card))
+        .child(div().w_full().flex().justify_center().child(hint))
+        .when(try_hint, |column| {
+            column.child(
+                div()
+                    .w_full()
+                    .text_caption()
+                    .text_color(rgb(paint(TEXT_TERTIARY)))
+                    .text_center()
+                    .child(tr("Try: \"for now, write formally\"")),
+            )
+        })
 }
 
 fn render_active_instructions(

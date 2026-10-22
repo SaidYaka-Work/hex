@@ -85,7 +85,7 @@ grep -q 'HEX dictation is ready' "$work/listener.log"
 # Settings is a client; the complete dictation below runs after that client exits.
 "$binary" app >"$work/app.log" 2>&1 &
 app=$!
-xdotool search --sync --onlyvisible --all --pid "$app" --name '^HEX$' >/dev/null
+xdotool search --sync --onlyvisible --all --pid "$app" --name '^Said\.ai$' >/dev/null
 kill -TERM "$app"
 wait "$app"
 app=

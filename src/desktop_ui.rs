@@ -1002,9 +1002,26 @@ const HOME_SPARKLE_SVG: &str = include_str!("../assets/icons/sparkle.svg");
 /// An inlined SVG tinted to `color`. Assets are compiled in, so the running
 /// app does not need a file beside the binary.
 pub(crate) fn vector_icon(svg: &'static str, size: f32, color: u32) -> AnyElement {
-    let colored = svg.replace("currentColor", &format!("#{:06x}", color & 0x00ff_ffff));
+    let colored = svg.replace("currentColor", &svg_fill(color));
     let image = Image::from_bytes(ImageFormat::Svg, colored.into_bytes());
     img(Arc::new(image)).size(px(size)).into_any_element()
+}
+
+/// Hex fill for an inlined SVG. GPUI uploads the pixmap as BGRA. Lavapipe
+/// samples that atlas without the swizzle, so a straight hex paints with red
+/// and blue exchanged (the listening sparkle looked blue). Hardware that
+/// honors `Bgra8Unorm` keeps the straight hex.
+fn svg_fill(color: u32) -> String {
+    let color = color & 0x00ff_ffff;
+    let software_vulkan =
+        std::env::var("VK_ICD_FILENAMES").is_ok_and(|value| value.contains("lvp"));
+    if !software_vulkan {
+        return format!("#{color:06x}");
+    }
+    let red = (color >> 16) & 0xff;
+    let green = (color >> 8) & 0xff;
+    let blue = color & 0xff;
+    format!("#{blue:02x}{green:02x}{red:02x}")
 }
 
 pub(crate) fn home_mic_icon(color: u32) -> AnyElement {

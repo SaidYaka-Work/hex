@@ -675,7 +675,10 @@ fn reveal_settings_window(notice: bool) {
 fn spawn_settings_window() {
     #[cfg(not(test))]
     if let Ok(exe) = std::env::current_exe() {
+        // `app` is explicit so this process opens Settings. A dev binary
+        // whose default command is the listener must not start a second one.
         let _ = std::process::Command::new(exe)
+            .arg("app")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -546,12 +546,24 @@ fn run_output_worker(
 }
 
 fn current_focus() -> crate::output_instructions::FocusRead {
-    match crate::context::ContextSnapshot::capture() {
-        Ok(snapshot) => match snapshot.application {
-            Some(application) => crate::output_instructions::FocusRead::App(application),
-            None => crate::output_instructions::FocusRead::None,
-        },
-        Err(_) => crate::output_instructions::FocusRead::Unreadable,
+    #[cfg(target_os = "macos")]
+    {
+        // Bundle id only. A full context snapshot runs AppleScript for Brave
+        // and can ask for automation permission on every paste.
+        return match crate::context::frontmost_bundle_identifier() {
+            Some(bundle) => crate::output_instructions::FocusRead::App(bundle),
+            None => crate::output_instructions::FocusRead::Unreadable,
+        };
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        match crate::context::ContextSnapshot::capture() {
+            Ok(snapshot) => match snapshot.application {
+                Some(application) => crate::output_instructions::FocusRead::App(application),
+                None => crate::output_instructions::FocusRead::None,
+            },
+            Err(_) => crate::output_instructions::FocusRead::Unreadable,
+        }
     }
 }
 

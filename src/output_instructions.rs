@@ -187,6 +187,7 @@ pub fn focus_is_self(focus: &FocusRead) -> bool {
     const OWN: &[&str] = &[
         "said.ai",
         "said",
+        "com.saidyaka.said",
         "hex",
         "hex-service",
         "voice-control",
@@ -523,11 +524,9 @@ fn decision_from_turn(turn: ModelTurn, spoken: &str, has_source: bool) -> Decisi
         ModelAction::ClearSession => Decision::clear(InstructionEvent::ClearedSession),
         ModelAction::ClearPersistent => Decision::clear(InstructionEvent::ClearedPersistent),
         ModelAction::ClearAll => Decision::clear(InstructionEvent::ClearedAll),
-        ModelAction::ApplyOnce
-            if instruction_only(spoken) || (!has_source && is_one_shot(&normalize(spoken))) =>
-        {
-            // A one-off with nothing selected, or an instruction the model
-            // labeled apply-once, is remembered as a session chip.
+        ModelAction::ApplyOnce if instruction_only(spoken) => {
+            // "for now" / "always" that the model labeled apply-once is still
+            // a standing style. A true one-off falls through and is not stored.
             style_decision(spoken, filled(turn.instruction, spoken))
         }
         ModelAction::ApplyOnce => {
@@ -1538,6 +1537,7 @@ mod tests {
             PasteDelivery::Clipboard
         );
         assert!(focus_is_self(&FocusRead::App("Said.ai".into())));
+        assert!(focus_is_self(&FocusRead::App("com.saidyaka.said".into())));
         assert!(!focus_is_self(&FocusRead::App("notes".into())));
         assert_eq!(
             paste_delivery(
@@ -1574,7 +1574,70 @@ mod tests {
     }
 
     #[test]
-    fn an_apply_once_without_a_selection_is_stored_for_the_session() {
+    fn a_for_now_instruction_is_still_there_after_a_restart() {
+        isolated(|| {
+            let outcome = accept("for now let's write formally", None);
+            assert_eq!(outcome.event, InstructionEvent::SessionUpdated);
+            LOCAL_STORE.with(|cell| *cell.borrow_mut() = Some(Store::new()));
+            let lines = active();
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].scope, InstructionScope::Session);
+            assert_eq!(lines[0].text, "for now let's write formally");
+        });
+    }
+
+    #[test]
+    fn a_one_shot_without_a_selection_is_not_stored() {
+        isolated_with(
+            crate::llm_backend::begin_mock("test-key", |_| {
+                let content = serde_json::json!({
+                    "action": "apply_once",
+                    "instruction": "translate this to Spanish",
+                    "append": false,
+                    "text": "hola",
+                })
+                .to_string();
+                Ok(crate::llm_backend::MockReply {
+                    status: 200,
+                    body: crate::llm_backend::chat_json(&content),
+                })
+            }),
+            || {
+                let outcome = accept("translate this to Spanish", None);
+                assert!(outcome.paste.is_none());
+                assert_eq!(outcome.event, InstructionEvent::NoTextYet);
+                assert!(active().is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn a_one_shot_with_a_selection_applies_once_and_is_not_stored() {
+        isolated_with(
+            crate::llm_backend::begin_mock("test-key", |_| {
+                let content = serde_json::json!({
+                    "action": "apply_once",
+                    "instruction": "",
+                    "append": false,
+                    "text": "hola",
+                })
+                .to_string();
+                Ok(crate::llm_backend::MockReply {
+                    status: 200,
+                    body: crate::llm_backend::chat_json(&content),
+                })
+            }),
+            || {
+                let outcome = accept("translate this to Spanish", Some("hello"));
+                assert_eq!(outcome.paste.as_deref(), Some("hola"));
+                assert_eq!(outcome.event, InstructionEvent::Applied);
+                assert!(active().is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn an_apply_once_for_now_without_a_selection_stays_a_session_chip() {
         isolated_with(
             crate::llm_backend::begin_mock("test-key", |_| {
                 let content = serde_json::json!({
