@@ -2,9 +2,12 @@
 //! [`crate::design_tokens`]; see `docs/design-system.md` for which component
 //! does which job.
 
+use std::time::Duration;
+
 use gpui::{
-    AnyElement, App, Div, ElementId, FontWeight, IntoElement, Pixels, Rgba, ShapedLine,
-    SharedString, Stateful, Window, canvas, div, prelude::*, px, rgb,
+    Animation, AnimationExt, AnyElement, App, Div, ElementId, FontWeight, IntoElement, Pixels,
+    Rgba, ShapedLine, SharedString, Stateful, Window, canvas, div, ease_in_out, prelude::*, px,
+    rgb,
 };
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -168,6 +171,7 @@ pub(crate) enum Icon {
     Accessibility,
     Waveform,
     Check,
+    Settings,
 }
 
 impl Icon {
@@ -179,7 +183,8 @@ impl Icon {
             | Self::Microphone
             | Self::Keyboard
             | Self::Accessibility
-            | Self::Waveform => ICON_SIZE,
+            | Self::Waveform
+            | Self::Settings => ICON_SIZE,
             _ => ICON_SIZE_SMALL,
         }
     }
@@ -199,6 +204,7 @@ impl Icon {
             Self::Accessibility => "accessibility",
             Self::Waveform => "waveform",
             Self::Check => "checkmark",
+            Self::Settings => "gearshape",
         }
     }
 
@@ -217,6 +223,7 @@ impl Icon {
             Self::Accessibility => "◉",
             Self::Waveform => "≋",
             Self::Check => "✓",
+            Self::Settings => "⚙",
         }
     }
 
@@ -235,6 +242,7 @@ impl Icon {
             Self::Accessibility => "\u{E776}",
             Self::Waveform => "\u{E8D6}",
             Self::Check => "\u{E73E}",
+            Self::Settings => "\u{E713}",
         }
     }
 }
@@ -983,8 +991,131 @@ pub(crate) fn button(kind: ButtonKind, label: impl IntoElement) -> Div {
         .child(label)
 }
 
-/// A [`CONTROL_HEIGHT_LARGE`] pill for the home actions. Same frame as
-/// [`button`], only taller.
+/// How the home orb moves. Reduced motion draws it still.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OrbMood {
+    Idle,
+    Listening,
+    Thinking,
+}
+
+/// The home voice mark: a terracotta disc on a soft glow. GPUI has no radial
+/// gradient, so the glow is a low-opacity circle.
+pub(crate) fn voice_orb(mood: OrbMood) -> AnyElement {
+    let orb = div()
+        .relative()
+        .size(px(ORB_GLOW))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .absolute()
+                .size(px(ORB_GLOW))
+                .rounded_full()
+                .bg(gpui::rgba((paint(ACCENT) << 8) | 0x28)),
+        )
+        .child(
+            div()
+                .size(px(ORB_SIZE))
+                .rounded_full()
+                .bg(rgb(paint(ACCENT)))
+                .shadow_lg(),
+        );
+    if crate::motion::reduced_motion() {
+        return orb.into_any_element();
+    }
+    let (id, duration) = match mood {
+        OrbMood::Idle => ("voice-orb-idle", Duration::from_millis(2400)),
+        OrbMood::Listening => ("voice-orb-listening", Duration::from_millis(900)),
+        OrbMood::Thinking => ("voice-orb-thinking", Duration::from_millis(700)),
+    };
+    orb.with_animation(
+        id,
+        Animation::new(duration).repeat().with_easing(ease_in_out),
+        move |orb, phase| {
+            let wave = if phase < 0.5 {
+                phase * 2.0
+            } else {
+                (1.0 - phase) * 2.0
+            };
+            let opacity = match mood {
+                OrbMood::Idle => 0.78 + (0.22 * wave),
+                OrbMood::Listening => 0.6 + (0.4 * wave),
+                OrbMood::Thinking => 0.42 + (0.58 * wave),
+            };
+            orb.opacity(opacity)
+        },
+    )
+    .into_any_element()
+}
+
+/// One of the two home actions. `filled` is the terracotta Talk card.
+pub(crate) fn action_card(filled: bool, recording: bool) -> Div {
+    let hairline = gpui::rgba((paint(TEXT_PRIMARY) << 8) | 0x1a);
+    let border = if recording {
+        rgb(paint(if filled { ON_ACCENT } else { ACCENT }))
+    } else {
+        hairline
+    };
+    let card = div()
+        .flex_1()
+        .h(px(ACTION_CARD_HEIGHT))
+        .p_3()
+        .flex()
+        .flex_col()
+        .justify_between()
+        .rounded(RADIUS_CARD)
+        .border_1()
+        .border_color(border)
+        .shadow_lg()
+        .cursor_pointer();
+    if filled {
+        card.bg(rgb(paint(ACCENT)))
+            .text_color(rgb(paint(ON_ACCENT)))
+    } else {
+        card.bg(rgb(paint(if recording { ACCENT_SURFACE } else { SURFACE })))
+            .text_color(rgb(paint(TEXT_PRIMARY)))
+    }
+}
+
+/// A small amber status, for a condition the person cannot fix in the window.
+pub(crate) fn status_pill(label: impl IntoElement) -> Div {
+    div()
+        .h(px(CONTROL_HEIGHT_SMALL))
+        .px_3()
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded(RADIUS_PILL)
+        .bg(rgb(paint(WARNING_SURFACE)))
+        .text_caption()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(paint(WARNING)))
+        .child(label)
+}
+
+/// A removable instruction chip. The caller adds the close button.
+pub(crate) fn instruction_chip(label: impl IntoElement) -> Div {
+    div()
+        .h(px(CONTROL_HEIGHT_SMALL + 4.0))
+        .pl_3()
+        .pr_1()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_1()
+        .rounded(RADIUS_PILL)
+        .border_1()
+        .border_color(gpui::rgba((paint(TEXT_PRIMARY) << 8) | 0x1a))
+        .bg(rgb(paint(SURFACE)))
+        .text_caption()
+        .text_color(rgb(paint(TEXT_SECONDARY)))
+        .child(label)
+}
+
+/// A [`CONTROL_HEIGHT_LARGE`] pill. The home uses [`action_card`] instead.
+#[allow(dead_code)]
 pub(crate) fn large_button(kind: ButtonKind, label: impl IntoElement) -> Div {
     button_frame(kind)
         .h(px(CONTROL_HEIGHT_LARGE))

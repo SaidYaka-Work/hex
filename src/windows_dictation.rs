@@ -206,6 +206,8 @@ pub fn run_with_transcriber(
     let mut finishing: Option<Finishing> = None;
     let (jobs, job_receiver) = mpsc::sync_channel::<OutputJob>(2);
     let jobs_for_ai = jobs.clone();
+    let ai_cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&ai_cancel);
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
     let (result_sender, results) = mpsc::channel();
@@ -228,6 +230,7 @@ pub fn run_with_transcriber(
                         &mut paster,
                         jobs_for_ai.clone(),
                         Arc::clone(&worker_stop),
+                        Arc::clone(&worker_cancel),
                     ),
                     OutputJob::DeferredPaste(text) => {
                         let result = paster
@@ -332,6 +335,7 @@ pub fn run_with_transcriber(
             let occurred_at = event.occurred_at(captured_through);
             match event.action {
                 HotkeyAction::Start if !recording && audio_ready => {
+                    ai_cancel.store(false, Ordering::Release);
                     capture.start_at(occurred_at);
                     recording = true;
                     recording_voice = false;
@@ -367,6 +371,7 @@ pub fn run_with_transcriber(
                     emit_state(&mut events, VoiceState::Dictating, &device_label)?;
                 }
                 HotkeyAction::VoiceStart if !recording && audio_ready => {
+                    ai_cancel.store(false, Ordering::Release);
                     capture.start_at(occurred_at);
                     recording = true;
                     recording_voice = true;
@@ -404,6 +409,12 @@ pub fn run_with_transcriber(
                 | HotkeyAction::VoiceCancel
                     if start_pending =>
                 {
+                    if matches!(
+                        event.action,
+                        HotkeyAction::Cancel | HotkeyAction::VoiceCancel
+                    ) {
+                        ai_cancel.store(true, Ordering::Release);
+                    }
                     pending_voice = false;
                     // Released before the opening microphone produced audio:
                     // nothing was captured, so treat it as a discard.
@@ -463,6 +474,7 @@ pub fn run_with_transcriber(
                     finishing = Some(begin_finishing(&capture, occurred_at, true));
                 }
                 HotkeyAction::VoiceCancel if recording && recording_voice => {
+                    ai_cancel.store(true, Ordering::Release);
                     if let Some(suppressor) = &audio_suppressor {
                         suppressor.restore();
                     }
@@ -511,6 +523,7 @@ pub fn run_with_transcriber(
                     finishing = Some(begin_finishing(&capture, occurred_at, false));
                 }
                 HotkeyAction::Cancel if recording && !recording_voice => {
+                    ai_cancel.store(true, Ordering::Release);
                     if let Some(suppressor) = &audio_suppressor {
                         suppressor.restore();
                     }
@@ -538,6 +551,9 @@ pub fn run_with_transcriber(
                         input.close();
                         audio_ready = false;
                     }
+                }
+                HotkeyAction::Cancel | HotkeyAction::VoiceCancel => {
+                    ai_cancel.store(true, Ordering::Release);
                 }
                 HotkeyAction::PasteLast if !recording => {
                     let queued = pending;
@@ -827,6 +843,13 @@ fn process_dictation_job(
     job_result(OutputKind::Dictation, result, latency_ms)
 }
 
+fn windows_focus() -> crate::output_instructions::FocusRead {
+    match crate::windows_input::foreground_process_stem() {
+        Some(application) => crate::output_instructions::FocusRead::App(application),
+        None => crate::output_instructions::FocusRead::None,
+    }
+}
+
 /// Transcribe the held instruction and store it. A one-shot rewrite pastes
 /// only when the configured language model returns text.
 fn process_voice_action_job(
@@ -834,6 +857,7 @@ fn process_voice_action_job(
     paster: &mut Result<WindowsPaster>,
     jobs: SyncSender<OutputJob>,
     stop: Arc<AtomicBool>,
+    ai_cancel: Arc<AtomicBool>,
 ) -> JobResult {
     let started = Instant::now();
     let transcription = job.transcript.wait().map(|transcribed| transcribed.text);
@@ -846,10 +870,14 @@ fn process_voice_action_job(
             tracing::warn!(%error, "could not copy the selection for the voice action");
             None
         });
+        let cancel = Arc::clone(&ai_cancel);
+        let shutdown = Arc::clone(&stop);
         crate::output_instructions::enqueue(
             instruction,
             selected,
-            Arc::new(move || stop.load(Ordering::Acquire)),
+            windows_focus(),
+            Arc::new(windows_focus),
+            Arc::new(move || cancel.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire)),
             move |text| {
                 let _ = jobs.send(OutputJob::DeferredPaste(text));
             },

@@ -3,10 +3,10 @@
 The GPUI desktop app is built from two modules. The running window is the
 Said.ai home (Talk and Talk to AI) on the paper palette sampled from
 saidyaka.com: warm canvas, white cards, near-black ink, and a terracotta
-accent (`#b4532a`, `#e8a87c` when the system is dark). Buttons are pills.
-Rows, menus, and inputs use a smaller corner. Instrument Serif and Instrument
-Sans are bundled. Preview fixtures still draw the previous panes with the
-same tokens.
+accent (`#b4532a`, `#e8a87c` when the system is dark). The dark canvas is
+`#0c0b0a` and the dark card is `#151311`. Instrument Serif is the wordmark
+only; everything else is Instrument Sans. Preview fixtures still draw the
+previous panes with the same tokens.
 
 - [`src/design_tokens.rs`](../src/design_tokens.rs) holds every raw value:
   colours, the type scale, spacing, radii, and control geometry.

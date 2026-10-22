@@ -543,6 +543,16 @@ fn run_output_worker(
     }
 }
 
+fn current_focus() -> crate::output_instructions::FocusRead {
+    match crate::context::ContextSnapshot::capture() {
+        Ok(snapshot) => match snapshot.application {
+            Some(application) => crate::output_instructions::FocusRead::App(application),
+            None => crate::output_instructions::FocusRead::None,
+        },
+        Err(_) => crate::output_instructions::FocusRead::Unreadable,
+    }
+}
+
 fn run_processor_worker(
     jobs: &Mutex<Receiver<ProcessorJob>>,
     output: &SyncSender<OutputJob>,
@@ -565,6 +575,8 @@ fn run_processor_worker(
             crate::output_instructions::enqueue(
                 job.text.clone(),
                 job.context.selected_text.clone(),
+                current_focus(),
+                Arc::new(current_focus),
                 Arc::new(move || control.is_cancelled()),
                 move |text| {
                     let _ = sender.send(OutputJob::InstructionPaste { text });

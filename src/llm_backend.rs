@@ -1,12 +1,24 @@
 //! The one language-model slot Said.ai calls.
 //!
-//! Change [`LLM_BACKEND`] to switch provider, and its `model` field to switch
-//! the Flash id. The key is `GEMINI_API_KEY`. It is read from the environment
-//! at call time and is never written into the binary, onto disk, into argv,
-//! or into the request URL.
+//! Switching provider or model is a string change, not a code change. The
+//! baked default talks to Google's OpenAI-compatible endpoint with
+//! `gemini-3.5-flash-lite` and reads the key from `GEMINI_API_KEY`. The same
+//! client reaches OpenRouter by pointing the slot at
+//! `https://openrouter.ai/api/v1` and a model id such as
+//! `google/gemini-3.5-flash-lite`.
 //!
-//! Talk does not call this module. Talk to AI classifies an utterance here,
-//! then may ask for a rewrite. Both calls share one transport.
+//! Resolution order, outside tests:
+//! 1. Baked [`LLM_SLOT`].
+//! 2. When `SAID_AI_CONFIG_URL` is set, a small JSON document fetched once
+//!    and cached as `ai-slot.json`. A failed fetch uses the cache, then the
+//!    baked slot.
+//! 3. `SAID_AI_BASE_URL`, `SAID_AI_MODEL`, and `SAID_AI_KEY_VARIABLE`
+//!    override that result.
+//!
+//! The key itself stays behind [`api_key`]: an environment variable named by
+//! the slot. A small proxy in front of this client would keep both the key
+//! and the model id out of the binary. Tests never read a real key and never
+//! hit the network.
 
 use std::io::{Read, Write};
 #[cfg(not(target_os = "windows"))]
@@ -15,66 +27,57 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 #[cfg(test)]
 use std::sync::Mutex;
+#[cfg(not(test))]
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Which provider the single slot uses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LlmProvider {
-    /// Google Gemini `generateContent`.
-    GeminiFlash,
-}
+#[cfg(not(test))]
+use serde::Deserialize;
 
-/// The owner's provider choice. This is the only configuration site.
-pub struct LlmBackend {
-    pub provider: LlmProvider,
-    /// Fastest current Flash text model.
-    ///
-    /// Google's models page, updated 2026-10-21, calls Gemini 3.5 Flash-Lite
-    /// "our fastest, most cost-effective 3.5 model for high-throughput
-    /// execution" and points new projects at it or at Gemini 3.8 Flash.
-    /// 3.8 Flash is the newer, more capable model and defaults to medium
-    /// thinking, so it is slower. There is no text 3.8 Flash-Lite, only a
-    /// speech model.
+/// Baked Talk to AI slot. Strings only; see the module docs for overrides.
+pub struct LlmSlot {
+    /// OpenAI-compatible origin, without `/chat/completions`.
+    pub base_url: &'static str,
     pub model: &'static str,
+    /// Environment variable that holds the bearer token.
+    pub key_variable: &'static str,
 }
 
-pub const LLM_BACKEND: LlmBackend = LlmBackend {
-    provider: LlmProvider::GeminiFlash,
+pub const LLM_SLOT: LlmSlot = LlmSlot {
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
     model: "gemini-3.5-flash-lite",
+    key_variable: "GEMINI_API_KEY",
 };
 
-const GEMINI_API_KEY_VARIABLE: &str = "GEMINI_API_KEY";
-const GENERATE_CONTENT_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(not(test))]
+const CONFIG_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+const TEMPERATURE: f32 = 0.2;
+const MAX_TOKENS: u32 = 800;
 
-/// Result of asking the configured backend to apply instructions.
+static THINKING: AtomicBool = AtomicBool::new(false);
+
+/// What one chat-completions call decided.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Rewrite {
+pub struct ModelTurn {
+    pub action: ModelAction,
+    pub instruction: String,
+    pub append: bool,
     pub text: String,
-    /// `true` only when the model returned rewritten text.
-    pub called_model: bool,
-    pub notice: RewriteNotice,
 }
 
-/// Why a model call did not produce text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RewriteNotice {
-    None,
-    MissingKey,
-    Failed,
-}
-
-/// What Gemini, or the offline fallback's caller, decided an utterance means.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ModelClass {
-    Session(String),
-    Persistent(String),
+pub enum ModelAction {
+    Session,
+    Persistent,
     ClearSession,
     ClearPersistent,
     ClearAll,
-    ApplyOnce(String),
+    ApplyOnce,
+    Rewrite,
     Ignore,
 }
 
@@ -82,107 +85,258 @@ pub enum ModelClass {
 pub enum ModelError {
     MissingKey,
     Failed,
+    Cancelled,
 }
 
-/// `true` when `GEMINI_API_KEY` is set to a usable value.
-pub fn gemini_key_present() -> bool {
-    std::env::var(GEMINI_API_KEY_VARIABLE)
-        .ok()
-        .and_then(|value| usable_key(&value))
-        .is_some()
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedSlot {
+    base_url: String,
+    model: String,
+    key_variable: String,
 }
 
-/// Ask the configured provider to classify one Talk to AI utterance.
+#[cfg(not(test))]
+#[derive(Clone, Debug, Deserialize)]
+struct SlotFile {
+    base_url: String,
+    model: String,
+    key_variable: String,
+}
+
+/// `true` while a Talk to AI request is in flight in this process.
 ///
-/// A missing key or a failed call returns [`ModelError`] and makes no further
-/// request. The caller then uses the offline phrase lists.
-pub fn classify_utterance(
-    transcript: &str,
+/// Other processes (the Linux settings window) also see a fresh marker file
+/// written beside the settings, so the home can shimmer without sharing memory.
+#[cfg(test)]
+pub fn is_thinking() -> bool {
+    THINKING.load(Ordering::Acquire)
+}
+
+#[cfg(not(test))]
+pub fn is_thinking() -> bool {
+    THINKING.load(Ordering::Acquire) || thinking_file_fresh()
+}
+
+/// Fetch remote slot JSON in the background, once. Tests do not.
+pub fn warm_slot() {
+    #[cfg(not(test))]
+    {
+        static STARTED: OnceLock<()> = OnceLock::new();
+        STARTED.get_or_init(|| {
+            let _ = thread::Builder::new()
+                .name("said-ai-slot".into())
+                .spawn(|| {
+                    let _ = resolved_slot();
+                });
+        });
+    }
+}
+
+/// `true` when the slot's key variable holds a usable value.
+pub fn api_key_present() -> bool {
+    api_key().is_some()
+}
+
+/// One JSON chat completion. A missing key, a failed call, or cancellation
+/// makes no further request.
+pub fn complete(
+    system: &str,
+    user: &str,
     cancelled: &dyn Fn() -> bool,
-) -> Result<ModelClass, ModelError> {
+) -> Result<ModelTurn, ModelError> {
     if cancelled() {
-        return Err(ModelError::Failed);
+        return Err(ModelError::Cancelled);
     }
     let Some(key) = api_key() else {
         return Err(ModelError::MissingKey);
     };
-    let prompt = format!(
-        "Classify this spoken instruction for a dictation app. Reply with one JSON object and no other text.\n\
-         Fields: action, instruction.\n\
-         action is one of: session, persistent, clear_session, clear_persistent, clear_all, apply_once, ignore.\n\
-         session: a temporary style, such as \"for now let's write formally\" or \"make it sound friendly\".\n\
-         persistent: a style to keep, such as \"always write formally\" or \"from now on be brief\".\n\
-         apply_once: change the current selection or the last transcript once, such as \"translate this to Spanish\".\n\
-         clear_session, clear_persistent, and clear_all forget instructions.\n\
-         ignore: not an instruction.\n\
-         instruction is the style or edit, or an empty string for clear and ignore.\n\n\
-         Utterance:\n{transcript}"
-    );
-    let prepared = prepare_request(&key, &prompt);
-    match dispatch(&prepared, cancelled) {
+    if cancelled() {
+        return Err(ModelError::Cancelled);
+    }
+    let prepared = prepare_request(&key, system, user);
+    set_thinking(true);
+    let result = dispatch(&prepared, cancelled);
+    set_thinking(false);
+    if cancelled() {
+        return Err(ModelError::Cancelled);
+    }
+    match result {
         Ok(response) if response.status == 200 => {
-            parse_classification(&response.body).map_err(|_| ModelError::Failed)
+            parse_turn(&response.body).map_err(|_| ModelError::Failed)
         }
         Ok(_) => Err(ModelError::Failed),
-        Err(DispatchError::Cancelled) => Err(ModelError::Failed),
+        Err(DispatchError::Cancelled) => Err(ModelError::Cancelled),
         Err(DispatchError::Failed) => Err(ModelError::Failed),
     }
 }
 
-/// Apply `instructions` to `text`. With no instructions, or without
-/// `GEMINI_API_KEY`, the text is returned unchanged and no request is made.
-pub fn rewrite(text: &str, instructions: &[String], cancelled: &dyn Fn() -> bool) -> Rewrite {
-    let instructions: Vec<&str> = instructions
-        .iter()
-        .map(|instruction| instruction.trim())
-        .filter(|instruction| !instruction.is_empty())
-        .collect();
-    if instructions.is_empty() || cancelled() {
-        return unchanged(text, RewriteNotice::None);
+fn set_thinking(on: bool) {
+    THINKING.store(on, Ordering::Release);
+    #[cfg(not(test))]
+    {
+        let path = thinking_path();
+        if on {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, b"1");
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
     }
-    let Some(key) = api_key() else {
-        return unchanged(text, RewriteNotice::MissingKey);
+}
+
+#[cfg(not(test))]
+fn thinking_path() -> PathBuf {
+    support_dir().join("ai-thinking")
+}
+
+#[cfg(not(test))]
+fn thinking_file_fresh() -> bool {
+    let Ok(meta) = std::fs::metadata(thinking_path()) else {
+        return false;
     };
-    let prepared = prepare_request(&key, &rewrite_prompt(text, &instructions));
-    if cancelled() {
-        return unchanged(text, RewriteNotice::None);
-    }
-    match dispatch(&prepared, cancelled) {
-        Ok(response) if response.status == 200 => match parse_generate_content(&response.body) {
-            Ok(rewritten) => Rewrite {
-                text: rewritten,
-                called_model: true,
-                notice: RewriteNotice::None,
-            },
-            Err(_) => unchanged(text, RewriteNotice::Failed),
-        },
-        Ok(_) => unchanged(text, RewriteNotice::Failed),
-        Err(DispatchError::Cancelled) => unchanged(text, RewriteNotice::None),
-        Err(DispatchError::Failed) => unchanged(text, RewriteNotice::Failed),
+    meta.modified()
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age < REQUEST_TIMEOUT + CONFIG_TIMEOUT)
+}
+
+fn baked_slot() -> ResolvedSlot {
+    ResolvedSlot {
+        base_url: LLM_SLOT.base_url.to_string(),
+        model: LLM_SLOT.model.to_string(),
+        key_variable: LLM_SLOT.key_variable.to_string(),
     }
 }
 
-fn unchanged(text: &str, notice: RewriteNotice) -> Rewrite {
-    Rewrite {
-        text: text.to_string(),
-        called_model: false,
-        notice,
+fn resolved_slot() -> ResolvedSlot {
+    #[cfg(test)]
+    {
+        baked_slot()
+    }
+    #[cfg(not(test))]
+    {
+        static SLOT: OnceLock<ResolvedSlot> = OnceLock::new();
+        SLOT.get_or_init(load_slot).clone()
     }
 }
 
-fn usable_key(raw: &str) -> Option<String> {
-    let key = raw.trim();
-    if key.is_empty()
-        || key.chars().any(|character| {
-            character.is_whitespace()
-                || character.is_control()
-                || character == '"'
-                || character == '\\'
-        })
+#[cfg(not(test))]
+fn load_slot() -> ResolvedSlot {
+    let mut slot = fetch_remote_slot().unwrap_or_else(baked_slot);
+    if let Some(base_url) = env_https("SAID_AI_BASE_URL") {
+        slot.base_url = base_url;
+    }
+    if let Some(model) = env_token("SAID_AI_MODEL") {
+        slot.model = model;
+    }
+    if let Some(key_variable) = env_token("SAID_AI_KEY_VARIABLE") {
+        slot.key_variable = key_variable;
+    }
+    slot
+}
+
+#[cfg(not(test))]
+fn fetch_remote_slot() -> Option<ResolvedSlot> {
+    let url = std::env::var("SAID_AI_CONFIG_URL").ok()?;
+    let url = url.trim();
+    if !url.starts_with("https://") || !safe_token(url) {
+        return read_cached_slot();
+    }
+    match fetch_https(url, CONFIG_TIMEOUT) {
+        Some(body) => parse_slot_file(&body).or_else(read_cached_slot),
+        None => read_cached_slot(),
+    }
+}
+
+#[cfg(not(test))]
+fn parse_slot_file(body: &str) -> Option<ResolvedSlot> {
+    let file: SlotFile = serde_json::from_str(body).ok()?;
+    let slot = ResolvedSlot {
+        base_url: file.base_url.trim().trim_end_matches('/').to_string(),
+        model: file.model.trim().to_string(),
+        key_variable: file.key_variable.trim().to_string(),
+    };
+    if !slot.base_url.starts_with("https://")
+        || !safe_token(&slot.base_url)
+        || !safe_token(&slot.model)
+        || !safe_token(&slot.key_variable)
     {
         return None;
     }
-    Some(key.to_string())
+    write_cached_slot(&slot);
+    Some(slot)
+}
+
+#[cfg(not(test))]
+fn cached_slot_path() -> PathBuf {
+    support_dir().join("ai-slot.json")
+}
+
+#[cfg(not(test))]
+fn read_cached_slot() -> Option<ResolvedSlot> {
+    let bytes = std::fs::read(cached_slot_path()).ok()?;
+    let body = String::from_utf8(bytes).ok()?;
+    let file: SlotFile = serde_json::from_str(&body).ok()?;
+    let slot = ResolvedSlot {
+        base_url: file.base_url,
+        model: file.model,
+        key_variable: file.key_variable,
+    };
+    (slot.base_url.starts_with("https://") && safe_token(&slot.model)).then_some(slot)
+}
+
+#[cfg(not(test))]
+fn write_cached_slot(slot: &ResolvedSlot) {
+    let path = cached_slot_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let bytes = serde_json::json!({
+        "base_url": slot.base_url,
+        "model": slot.model,
+        "key_variable": slot.key_variable,
+    })
+    .to_string()
+    .into_bytes();
+    let temporary = path.with_extension("json.tmp");
+    if std::fs::write(&temporary, bytes).is_ok() {
+        let _ = std::fs::rename(&temporary, path);
+    }
+}
+
+#[cfg(not(test))]
+fn support_dir() -> PathBuf {
+    crate::app_paths::support_dir().unwrap_or_else(|_| std::env::temp_dir().join("said-ai"))
+}
+
+#[cfg(not(test))]
+fn env_https(name: &str) -> Option<String> {
+    let value = env_token(name)?;
+    let value = value.trim_end_matches('/').to_string();
+    value.starts_with("https://").then_some(value)
+}
+
+#[cfg(not(test))]
+fn env_token(name: &str) -> Option<String> {
+    let value = std::env::var(name).ok()?;
+    let value = value.trim();
+    safe_token(value).then_some(value.to_string())
+}
+
+fn safe_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            !character.is_whitespace()
+                && !character.is_control()
+                && character != '"'
+                && character != '\\'
+        })
+}
+
+fn usable_key(raw: &str) -> Option<String> {
+    safe_token(raw.trim()).then(|| raw.trim().to_string())
 }
 
 fn api_key() -> Option<String> {
@@ -197,24 +351,15 @@ fn api_key() -> Option<String> {
     }
     #[cfg(not(test))]
     {
-        std::env::var(GEMINI_API_KEY_VARIABLE)
+        let variable = resolved_slot().key_variable;
+        std::env::var(variable)
             .ok()
             .and_then(|value| usable_key(&value))
     }
 }
 
-fn rewrite_prompt(text: &str, instructions: &[&str]) -> String {
-    let mut prompt = String::from(
-        "Rewrite the text so it follows every instruction. Reply with only the rewritten text, with no quotes and no explanation.\n\nInstructions:\n",
-    );
-    for instruction in instructions {
-        prompt.push_str("- ");
-        prompt.push_str(instruction);
-        prompt.push('\n');
-    }
-    prompt.push_str("\nText:\n");
-    prompt.push_str(text.trim());
-    prompt
+fn chat_completions_url(base_url: &str) -> String {
+    format!("{}/chat/completions", base_url.trim_end_matches('/'))
 }
 
 #[derive(Clone)]
@@ -235,45 +380,43 @@ enum DispatchError {
     Failed,
 }
 
-fn prepare_request(api_key: &str, prompt: &str) -> PreparedRequest {
-    let model = match LLM_BACKEND.provider {
-        LlmProvider::GeminiFlash => LLM_BACKEND.model,
-    };
-    let url = format!("{GENERATE_CONTENT_URL}/{model}:generateContent");
+fn prepare_request(api_key: &str, system: &str, user: &str) -> PreparedRequest {
+    let slot = resolved_slot();
+    let url = chat_completions_url(&slot.base_url);
     let body = serde_json::json!({
-        "contents": [{
-            "role": "user",
-            "parts": [{ "text": prompt }]
-        }]
+        "model": slot.model,
+        "temperature": TEMPERATURE,
+        "max_tokens": MAX_TOKENS,
+        "response_format": { "type": "json_object" },
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user }
+        ]
     })
     .to_string();
     let config = format!(
-        "url = \"{}\"\nheader = \"Content-Type: application/json\"\nheader = \"x-goog-api-key: {}\"\ndata-binary = \"{}\"\n",
+        "url = \"{}\"\nheader = \"Content-Type: application/json\"\nheader = \"Authorization: Bearer {}\"\ndata-binary = \"{}\"\n",
         curl_quoted(&url),
         curl_quoted(api_key),
         curl_quoted(&body),
     );
     PreparedRequest {
         url,
-        prompt: prompt.to_string(),
-        arguments: curl_arguments(),
+        prompt: user.to_string(),
+        arguments: curl_arguments(REQUEST_TIMEOUT),
         config,
     }
 }
 
-fn curl_arguments() -> Vec<String> {
+fn curl_arguments(timeout: Duration) -> Vec<String> {
     [
         "--disable",
         "--silent",
         "--show-error",
         "--max-time",
-        "20",
+        &timeout.as_secs().to_string(),
         "--write-out",
         "\n%{http_code}",
-        "--noproxy",
-        "*",
-        "--proxy",
-        "",
         "--proto",
         "=https",
         "--proto-redir",
@@ -383,6 +526,19 @@ fn dispatch_curl(
     })
 }
 
+#[cfg(not(test))]
+fn fetch_https(url: &str, timeout: Duration) -> Option<String> {
+    let config = format!("url = \"{}\"\n", curl_quoted(url));
+    let prepared = PreparedRequest {
+        url: url.to_string(),
+        prompt: url.to_string(),
+        arguments: curl_arguments(timeout),
+        config,
+    };
+    let response = dispatch_curl(&prepared, &|| false).ok()?;
+    (response.status == 200).then_some(response.body)
+}
+
 fn split_http_status(stdout: &str) -> (String, Option<u16>) {
     match stdout.rsplit_once('\n') {
         Some((body, status)) => {
@@ -397,25 +553,16 @@ fn split_http_status(stdout: &str) -> (String, Option<u16>) {
     }
 }
 
-fn parse_generate_content(body: &str) -> Result<String, ()> {
+fn message_content(body: &str) -> Result<String, ()> {
     let value: serde_json::Value = serde_json::from_str(body).map_err(|_| ())?;
     if value.get("error").is_some() {
         return Err(());
     }
-    let parts = value
-        .pointer("/candidates/0/content/parts")
-        .and_then(|parts| parts.as_array())
+    let content = value
+        .pointer("/choices/0/message/content")
+        .and_then(|content| content.as_str())
         .ok_or(())?;
-    let mut text = String::new();
-    for part in parts {
-        if part.get("thought").and_then(|thought| thought.as_bool()) == Some(true) {
-            continue;
-        }
-        if let Some(piece) = part.get("text").and_then(|piece| piece.as_str()) {
-            text.push_str(piece);
-        }
-    }
-    let text = text.trim();
+    let text = strip_fences(content).trim();
     if text.is_empty() {
         Err(())
     } else {
@@ -423,8 +570,18 @@ fn parse_generate_content(body: &str) -> Result<String, ()> {
     }
 }
 
-fn parse_classification(body: &str) -> Result<ModelClass, ()> {
-    let text = parse_generate_content(body)?;
+fn strip_fences(text: &str) -> &str {
+    let trimmed = text.trim();
+    let trimmed = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed)
+        .trim();
+    trimmed.strip_suffix("```").unwrap_or(trimmed).trim()
+}
+
+fn parse_turn(body: &str) -> Result<ModelTurn, ()> {
+    let text = message_content(body)?;
     let start = text.find('{').ok_or(())?;
     let end = text.rfind('}').ok_or(())?;
     let value: serde_json::Value = serde_json::from_str(&text[start..=end]).map_err(|_| ())?;
@@ -438,15 +595,32 @@ fn parse_classification(body: &str) -> Result<ModelClass, ()> {
         .unwrap_or("")
         .trim()
         .to_string();
-    Ok(match action {
-        "session" => ModelClass::Session(instruction),
-        "persistent" => ModelClass::Persistent(instruction),
-        "clear_session" => ModelClass::ClearSession,
-        "clear_persistent" => ModelClass::ClearPersistent,
-        "clear_all" => ModelClass::ClearAll,
-        "apply_once" => ModelClass::ApplyOnce(instruction),
-        "ignore" => ModelClass::Ignore,
+    let append = value
+        .get("append")
+        .and_then(|append| append.as_bool())
+        .unwrap_or(false);
+    let text = value
+        .get("text")
+        .and_then(|text| text.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let action = match action {
+        "session" => ModelAction::Session,
+        "persistent" => ModelAction::Persistent,
+        "clear_session" => ModelAction::ClearSession,
+        "clear_persistent" => ModelAction::ClearPersistent,
+        "clear_all" => ModelAction::ClearAll,
+        "apply_once" => ModelAction::ApplyOnce,
+        "rewrite" => ModelAction::Rewrite,
+        "ignore" => ModelAction::Ignore,
         _ => return Err(()),
+    };
+    Ok(ModelTurn {
+        action,
+        instruction,
+        append,
+        text,
     })
 }
 
@@ -628,6 +802,16 @@ pub(crate) fn captured_requests() -> Vec<CapturedRequest> {
 }
 
 #[cfg(test)]
+pub(crate) fn chat_json(content: &str) -> String {
+    serde_json::json!({
+        "choices": [{
+            "message": { "role": "assistant", "content": content }
+        }]
+    })
+    .to_string()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -635,113 +819,120 @@ mod tests {
         false
     }
 
-    fn json_text(text: &str) -> String {
-        format!(
-            r#"{{"candidates":[{{"content":{{"parts":[{{"thought":true,"text":"hidden"}},{{"text":{}}}]}}}}]}}"#,
-            serde_json::to_string(text).unwrap()
-        )
-    }
-
     fn reply_ok(request: &CapturedRequest) -> Result<MockReply, String> {
-        assert!(request.url.contains(LLM_BACKEND.model));
-        assert!(request.url.ends_with(":generateContent"));
+        assert!(request.url.ends_with("/chat/completions"));
+        assert!(request.url.contains(LLM_SLOT.model) || request.config.contains(LLM_SLOT.model));
+        assert!(
+            request
+                .url
+                .starts_with("https://generativelanguage.googleapis.com/v1beta/openai/")
+        );
         assert!(!request.url.contains("test-key"));
         assert!(request.arguments.iter().all(|argument| {
-            !argument.contains("test-key") && !argument.contains("generativelanguage")
+            !argument.contains("test-key") && argument != "--noproxy" && argument != "--proxy"
         }));
-        assert!(request.config.contains("x-goog-api-key: test-key"));
-        assert!(request.config.contains("\"hello\\\"there\"") || request.prompt.contains("hello"));
+        assert!(request.config.contains("Authorization: Bearer test-key"));
+        assert!(request.config.contains("gemini-3.5-flash-lite"));
+        assert!(request.config.contains("temperature"));
+        assert!(request.config.contains("max_tokens"));
+        assert!(request.config.contains("json_object"));
+        assert!(is_thinking());
         Ok(MockReply {
             status: 200,
-            body: json_text("hola"),
+            body: chat_json(
+                r#"{"action":"rewrite","instruction":"","append":false,"text":"hola"}"#,
+            ),
         })
+    }
+
+    #[test]
+    fn chat_url_joins_google_and_openrouter() {
+        assert_eq!(
+            chat_completions_url("https://generativelanguage.googleapis.com/v1beta/openai"),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://openrouter.ai/api/v1"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://openrouter.ai/api/v1/"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
     }
 
     #[test]
     fn missing_key_does_not_call_the_transport() {
         let _guard = begin_missing_key();
-        let rewrite = rewrite(
-            "hello there",
-            &["translate this to Spanish".into()],
-            &running,
-        );
-        assert_eq!(rewrite.text, "hello there");
-        assert!(!rewrite.called_model);
-        assert_eq!(rewrite.notice, RewriteNotice::MissingKey);
+        let error = complete("system", "hello there", &running).unwrap_err();
+        assert_eq!(error, ModelError::MissingKey);
         assert!(captured_requests().is_empty());
-        assert!(classify_utterance("translate this to Spanish", &running).is_err());
-        assert!(captured_requests().is_empty());
+        assert!(!is_thinking());
     }
 
     #[test]
-    fn empty_instructions_skip_the_backend() {
+    fn complete_reads_chat_completions_json() {
         let _guard = begin_mock("test-key", reply_ok);
-        let rewrite = rewrite("hello there", &[], &running);
-        assert_eq!(rewrite.text, "hello there");
-        assert!(!rewrite.called_model);
-        assert!(captured_requests().is_empty());
-    }
-
-    #[test]
-    fn rewrite_uses_the_mocked_generate_content_response() {
-        let _guard = begin_mock("test-key", reply_ok);
-        let rewrite = rewrite(
-            "hello \"there\"",
-            &["translate this to Spanish".into(), "write formally".into()],
-            &running,
-        );
-        assert_eq!(rewrite.text, "hola");
-        assert!(rewrite.called_model);
+        let turn = complete("system", "hello \"there\"", &running).unwrap();
+        assert_eq!(turn.action, ModelAction::Rewrite);
+        assert_eq!(turn.text, "hola");
+        assert!(!is_thinking());
         let requests = captured_requests();
         assert_eq!(requests.len(), 1);
-        assert!(requests[0].prompt.contains("translate this to Spanish"));
-        assert!(requests[0].prompt.contains("write formally"));
         assert!(requests[0].prompt.contains("hello \"there\""));
-        assert!(requests[0].url.contains("gemini-3.5-flash-lite"));
+        assert!(requests[0].config.contains("system"));
     }
 
     #[test]
-    fn a_failed_response_returns_the_original_text() {
+    fn fences_around_json_are_stripped() {
+        let _guard = begin_mock("test-key", |_| {
+            Ok(MockReply {
+                status: 200,
+                body: chat_json(
+                    "```json\n{\"action\":\"ignore\",\"instruction\":\"\",\"append\":false,\"text\":\"\"}\n```",
+                ),
+            })
+        });
+        let turn = complete("system", "hello", &running).unwrap();
+        assert_eq!(turn.action, ModelAction::Ignore);
+    }
+
+    #[test]
+    fn a_failed_response_is_a_failure() {
         let _guard = begin_mock("test-key", |_| {
             Ok(MockReply {
                 status: 400,
                 body: r#"{"error":{"message":"no"}}"#.into(),
             })
         });
-        let rewrite = rewrite("hello there", &["translate this".into()], &running);
-        assert_eq!(rewrite.text, "hello there");
-        assert!(!rewrite.called_model);
-        assert_eq!(rewrite.notice, RewriteNotice::Failed);
-    }
-
-    #[test]
-    fn classification_reads_the_model_json() {
-        let _guard = begin_mock("test-key", |_| {
-            Ok(MockReply {
-                status: 200,
-                body: json_text(
-                    r#"{"action":"apply_once","instruction":"translate this to Spanish"}"#,
-                ),
-            })
-        });
-        let class = classify_utterance("translate this to Spanish", &running).unwrap();
         assert_eq!(
-            class,
-            ModelClass::ApplyOnce("translate this to Spanish".into())
-        );
-    }
-
-    #[test]
-    fn an_unreadable_classification_is_a_failure() {
-        let _guard = begin_mock("test-key", |_| {
-            Ok(MockReply {
-                status: 200,
-                body: json_text("not json"),
-            })
-        });
-        assert_eq!(
-            classify_utterance("hello", &running),
+            complete("system", "hello there", &running),
             Err(ModelError::Failed)
         );
+        assert!(!is_thinking());
+    }
+
+    #[test]
+    fn an_unreadable_body_is_a_failure() {
+        let _guard = begin_mock("test-key", |_| {
+            Ok(MockReply {
+                status: 200,
+                body: chat_json("not json"),
+            })
+        });
+        assert_eq!(
+            complete("system", "hello", &running),
+            Err(ModelError::Failed)
+        );
+    }
+
+    #[test]
+    fn cancellation_does_not_parse_a_body() {
+        let _guard = begin_mock("test-key", reply_ok);
+        assert_eq!(
+            complete("system", "hello", &|| true),
+            Err(ModelError::Cancelled)
+        );
+        assert!(captured_requests().is_empty());
     }
 }

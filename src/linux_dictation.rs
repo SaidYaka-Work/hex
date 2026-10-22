@@ -133,6 +133,7 @@ pub fn run(
     transcriber: Option<LocalTranscriber>,
     hotkey_status: HotkeyStatus,
 ) -> Result<()> {
+    crate::llm_backend::warm_slot();
     let transcriber =
         transcriber.map_or_else(|| LocalTranscriber::load(&settings.transcription), Ok)?;
     // The engine outlives the output worker, which waits on its transcripts.
@@ -176,6 +177,8 @@ pub fn run(
         crate::linux_audio_control::AudioSuppressor::new(settings.recording_audio_behavior);
     let (jobs, job_receiver) = mpsc::sync_channel::<OutputJob>(2);
     let jobs_for_ai = jobs.clone();
+    let ai_cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&ai_cancel);
     let (result_sender, results) = mpsc::channel();
     let worker_stop = output.stop.clone();
     output.worker = Some(thread::spawn(move || {
@@ -241,6 +244,7 @@ pub fn run(
                         paster,
                         jobs_for_ai.clone(),
                         worker_stop.clone(),
+                        Arc::clone(&worker_cancel),
                     );
                 }
                 if worker_stop.load(Ordering::Acquire) {
@@ -336,6 +340,7 @@ pub fn run(
                 HotkeyEvent::Start | HotkeyEvent::VoiceStart
                     if !capture.is_recording() && !start_pending =>
                 {
+                    ai_cancel.store(false, Ordering::Release);
                     recording_voice = action == HotkeyEvent::VoiceStart;
                     if audio_ready {
                         // An instruction plays no start tone, as on Windows.
@@ -359,6 +364,9 @@ pub fn run(
                 HotkeyEvent::Finish | HotkeyEvent::VoiceFinish | HotkeyEvent::Cancel
                     if start_pending =>
                 {
+                    if action == HotkeyEvent::Cancel {
+                        ai_cancel.store(true, Ordering::Release);
+                    }
                     recording_voice = false;
                     // Released before the opening microphone produced audio:
                     // nothing was captured.
@@ -391,6 +399,7 @@ pub fn run(
                     }
                 }
                 HotkeyEvent::Cancel if capture.is_recording() => {
+                    ai_cancel.store(true, Ordering::Release);
                     recording_voice = false;
                     capture.cancel();
                     feedback::retract_start();
@@ -406,6 +415,9 @@ pub fn run(
                         active_state(capture.is_recording(), pending),
                         &device_label,
                     )?;
+                }
+                HotkeyEvent::Cancel => {
+                    ai_cancel.store(true, Ordering::Release);
                 }
                 _ => {}
             }
@@ -438,7 +450,15 @@ pub fn run(
             )?;
         }
 
-        indicator.update(capture.is_recording() || start_pending, pending);
+        indicator.update(
+            capture.is_recording() || start_pending,
+            pending,
+            crate::llm_backend::is_thinking(),
+            &hud_caption(
+                capture.is_recording() || start_pending,
+                crate::llm_backend::is_thinking(),
+            ),
+        );
         match input.recv_timeout(UPDATE_INTERVAL, !capture.is_recording()) {
             RecoveringAudioInputEvent::Chunk {
                 samples,
@@ -514,7 +534,7 @@ pub fn run(
         capture.cancel();
         events.dictation(DictationPhase::Cancelled, "")?;
     }
-    indicator.update(false, pending);
+    indicator.update(false, pending, false, "");
     suppressor.restore();
     emit_state(&mut events, VoiceState::Stopping, &device_label)?;
     output.stop.store(true, Ordering::Release);
@@ -541,17 +561,46 @@ fn run_voice_action(
     paster: &mut LinuxPaster,
     jobs: mpsc::SyncSender<OutputJob>,
     stop: Arc<AtomicBool>,
+    ai_cancel: Arc<AtomicBool>,
 ) -> Result<String> {
     let selected = paster.selected_text();
+    let focus = linux_focus();
     crate::output_instructions::enqueue(
         instruction.to_string(),
         selected,
-        Arc::new(move || stop.load(Ordering::Acquire)),
+        focus,
+        Arc::new(linux_focus),
+        Arc::new(move || ai_cancel.load(Ordering::Acquire) || stop.load(Ordering::Acquire)),
         move |text| {
             let _ = jobs.send(OutputJob::DeferredPaste(text));
         },
     );
     Ok(String::new())
+}
+
+fn linux_focus() -> crate::output_instructions::FocusRead {
+    if crate::linux_session::LinuxSession::detect().is_wayland() {
+        return crate::output_instructions::FocusRead::Unreadable;
+    }
+    match crate::linux_context::capture().application {
+        Some(application) => crate::output_instructions::FocusRead::App(application),
+        None => crate::output_instructions::FocusRead::None,
+    }
+}
+
+fn hud_caption(recording: bool, thinking: bool) -> String {
+    if !recording && !thinking {
+        return String::new();
+    }
+    let state = if recording {
+        crate::desktop_i18n::tr("Recording")
+    } else {
+        crate::desktop_i18n::tr("Thinking")
+    };
+    match crate::output_instructions::active().into_iter().next() {
+        Some(instruction) => format!("{state} · {} · Esc", instruction.text),
+        None => format!("{state} · Esc"),
+    }
 }
 
 /// Applies the saved sound settings and preloads the tones.

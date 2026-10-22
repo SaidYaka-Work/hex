@@ -1,11 +1,11 @@
 //! Spoken instructions that change how Said.ai's text comes out.
 //!
 //! Talk stores the Parakeet transcript and pastes it unchanged. Talk to AI
-//! classifies the utterance with the configured model when `GEMINI_API_KEY`
-//! is set, on a thread that does not own dictation output. Phrase lists are
-//! the offline fallback. One-shots rewrite the selection or the last Talk
-//! transcript and are not stored. Session and persistent instructions are
-//! included in that rewrite.
+//! asks the configured model, on a thread that does not own dictation output,
+//! for one JSON object that both classifies the utterance and rewrites text.
+//! Phrase lists are the offline fallback. One-shots and ordinary speech are
+//! not stored. Session and persistent instructions are included when a source
+//! is rewritten.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,10 +16,12 @@ use std::thread;
 
 use serde::{Deserialize, Serialize};
 
-use crate::llm_backend::{self, ModelClass, ModelError, RewriteNotice};
+use crate::llm_backend::{self, ModelAction, ModelError, ModelTurn};
 
 const MAX_INSTRUCTIONS: usize = 8;
 const MAX_CHARS: usize = 500;
+/// Selected text included in one model call. Longer selections are cut here.
+const SOURCE_CAP: usize = 4_000;
 
 static REVISION: AtomicU64 = AtomicU64::new(0);
 static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
@@ -32,15 +34,6 @@ pub enum InstructionScope {
     Session,
     /// Kept across restarts until the person clears it.
     Persistent,
-}
-
-impl InstructionScope {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Session => "For now",
-            Self::Persistent => "Always",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,10 +66,10 @@ impl InstructionEvent {
             Self::ClearedAll => "Cleared every instruction.",
             Self::Applied => "Applied that to the current text.",
             Self::WaitingForModel => {
-                "Heard that. AI is not configured, so the text stays as dictated."
+                "Heard that. AI is unavailable right now, so the text stays as dictated."
             }
             Self::RequestFailed => {
-                "Heard that. Gemini didn't answer, so the text stays as dictated."
+                "Heard that. AI is unavailable right now, so the text stays as dictated."
             }
             Self::NoTextYet => "Heard that. There is no text to change yet.",
         }
@@ -93,6 +86,8 @@ pub struct InstructionOutcome {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct PersistentFile {
     instructions: Vec<String>,
+    #[serde(default)]
+    selection_notice_shown: bool,
 }
 
 struct Store {
@@ -101,6 +96,8 @@ struct Store {
     last_dictation: Option<String>,
     event: Option<InstructionEvent>,
     loaded: bool,
+    selection_notice_shown: bool,
+    selection_notice_pending: bool,
 }
 
 impl Store {
@@ -111,13 +108,42 @@ impl Store {
             last_dictation: None,
             event: None,
             loaded: false,
+            selection_notice_shown: false,
+            selection_notice_pending: false,
         }
+    }
+}
+
+/// Focus observed around a Talk to AI call.
+///
+/// `Unreadable` is Wayland, or a platform read that failed. It does not block
+/// a paste. A confirmed app at the start, then a different app or no app,
+/// does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FocusRead {
+    /// Wayland, or a focus read that failed. Windows always reports `None` or `App`.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    Unreadable,
+    None,
+    App(String),
+}
+
+pub fn focus_allows_paste(start: &FocusRead, now: &FocusRead) -> bool {
+    let FocusRead::App(start) = start else {
+        return true;
+    };
+    match now {
+        FocusRead::Unreadable => true,
+        FocusRead::None => false,
+        FocusRead::App(now) => now == start,
     }
 }
 
 struct AiJob {
     transcript: String,
     selected: Option<String>,
+    focus: FocusRead,
+    focus_now: Arc<dyn Fn() -> FocusRead + Send + Sync>,
     cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
     paste: Box<dyn Fn(String) + Send>,
 }
@@ -148,6 +174,43 @@ fn with_store<T>(f: impl FnOnce(&mut Store) -> T) -> T {
 
 pub fn last_event() -> Option<InstructionEvent> {
     with_store(|state| state.event)
+}
+
+/// Drop one chip. Persistent removals are written; session removals are not.
+pub fn dismiss(scope: InstructionScope, text: &str) {
+    with_store(|state| {
+        let changed = match scope {
+            InstructionScope::Session => {
+                let before = state.session.len();
+                state.session.retain(|item| item != text);
+                state.session.len() != before
+            }
+            InstructionScope::Persistent => {
+                let before = state.persistent.len();
+                state.persistent.retain(|item| item != text);
+                let changed = state.persistent.len() != before;
+                if changed {
+                    save_state(state);
+                }
+                changed
+            }
+        };
+        if changed {
+            state.event = None;
+            bump();
+        }
+    });
+}
+
+/// The one-time sentence shown the first time selected text is sent.
+pub fn take_selection_notice() -> Option<&'static str> {
+    with_store(|state| {
+        if !state.selection_notice_pending {
+            return None;
+        }
+        state.selection_notice_pending = false;
+        Some("Selected text is sent to our AI service.")
+    })
 }
 
 pub fn active() -> Vec<ActiveInstruction> {
@@ -192,7 +255,7 @@ pub fn finish_talk_unless_cancelled(transcript: &str, cancelled: bool) -> String
 
 /// Classify and apply a Talk to AI utterance on the caller thread.
 ///
-/// The dictation output threads use [`enqueue`] instead, so a Gemini call
+/// The dictation output threads use [`enqueue`] instead, so a model call
 /// cannot hold up Talk.
 #[cfg(test)]
 pub fn accept(transcript: &str, selected: Option<&str>) -> InstructionOutcome {
@@ -206,12 +269,16 @@ pub fn accept(transcript: &str, selected: Option<&str>) -> InstructionOutcome {
 pub fn enqueue(
     transcript: String,
     selected: Option<String>,
+    focus: FocusRead,
+    focus_now: Arc<dyn Fn() -> FocusRead + Send + Sync>,
     cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
     paste: impl Fn(String) + Send + 'static,
 ) {
     let job = AiJob {
         transcript,
         selected,
+        focus,
+        focus_now,
         cancelled,
         paste: Box::new(paste),
     };
@@ -239,6 +306,9 @@ fn worker_sender() -> Sender<AiJob> {
                         if (job.cancelled)() {
                             continue;
                         }
+                        if !focus_allows_paste(&job.focus, &(job.focus_now)()) {
+                            continue;
+                        }
                         if let Some(text) = outcome.paste.filter(|text| !text.trim().is_empty()) {
                             (job.paste)(text);
                         }
@@ -250,68 +320,184 @@ fn worker_sender() -> Sender<AiJob> {
         .clone()
 }
 
+const SYSTEM_PROMPT: &str = "\
+You edit dictation for a voice app. Reply with one JSON object and no other text. \
+Fields: action, instruction, append, text. \
+action is one of: session, persistent, clear_session, clear_persistent, clear_all, apply_once, rewrite, ignore. \
+session: a temporary style, such as \"for now write formally\". \
+persistent: a style to keep, such as \"always write formally\". Set append true so other saved preferences stay. \
+also sets append true. \
+apply_once: edit Source once, such as \"translate this to Spanish\". Do not store it. \
+rewrite: ordinary speech. Rewrite the utterance with the active instructions into text. \
+clear_session, clear_persistent, and clear_all forget instructions. \
+ignore: nothing to paste. \
+instruction is the style, or empty. \
+text is the paste-ready rewrite of Source when Source is present, or of the utterance when action is rewrite. \
+Leave text empty when nothing should be pasted. Never put the instruction itself in text.";
+
 fn accept_with(
     transcript: &str,
     selected: Option<&str>,
     cancelled: &dyn Fn() -> bool,
 ) -> InstructionOutcome {
     if cancelled() {
-        return InstructionOutcome {
-            paste: None,
-            event: InstructionEvent::NoTextYet,
-        };
+        return quiet();
     }
     let spoken = transcript.trim();
     if spoken.is_empty() {
         return remember(InstructionEvent::NoTextYet, None);
     }
-    let choice = match llm_backend::classify_utterance(spoken, cancelled) {
-        Ok(class) => choice_from_model(class, spoken),
-        Err(ModelError::MissingKey | ModelError::Failed) => choice_from_fallback(spoken),
+    let selected_text = selected
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(clip_source);
+    let source = selected_text.clone().or_else(|| {
+        with_store(|state| state.last_dictation.clone()).map(|text| clip_source(&text))
+    });
+    let instructions = with_store(|state| standing(state));
+    let user = user_prompt(&instructions, source.as_deref(), spoken);
+    let decision = match llm_backend::complete(SYSTEM_PROMPT, &user, cancelled) {
+        Ok(turn) => {
+            if selected_text.is_some() {
+                mark_selection_notice();
+            }
+            decision_from_turn(turn, spoken, source.is_some())
+        }
+        Err(ModelError::Cancelled) => return quiet(),
+        Err(ModelError::MissingKey) => {
+            decision_from_fallback(spoken, InstructionEvent::WaitingForModel)
+        }
+        Err(ModelError::Failed) => {
+            if selected_text.is_some() {
+                mark_selection_notice();
+            }
+            decision_from_fallback(spoken, InstructionEvent::RequestFailed)
+        }
     };
     if cancelled() {
-        return InstructionOutcome {
+        return quiet();
+    }
+    apply_decision(decision)
+}
+
+fn quiet() -> InstructionOutcome {
+    InstructionOutcome {
+        paste: None,
+        event: InstructionEvent::NoTextYet,
+    }
+}
+
+fn user_prompt(instructions: &[String], source: Option<&str>, spoken: &str) -> String {
+    let mut prompt = String::from("Active instructions:\n");
+    if instructions.is_empty() {
+        prompt.push_str("(none)\n");
+    } else {
+        for instruction in instructions {
+            prompt.push_str("- ");
+            prompt.push_str(instruction);
+            prompt.push('\n');
+        }
+    }
+    prompt.push_str("\nSource:\n");
+    prompt.push_str(source.unwrap_or("(none)"));
+    prompt.push_str("\n\nUtterance:\n");
+    prompt.push_str(spoken);
+    prompt
+}
+
+fn decision_from_turn(turn: ModelTurn, spoken: &str, has_source: bool) -> Decision {
+    let paste_text = nonempty(&turn.text);
+    match turn.action {
+        ModelAction::Session => Decision {
+            store: Some(StoreOp {
+                persistent: false,
+                text: filled(turn.instruction, spoken),
+                append: turn.append,
+            }),
+            paste: has_source.then_some(paste_text).flatten(),
+            event: InstructionEvent::SessionUpdated,
+        },
+        ModelAction::Persistent => Decision {
+            store: Some(StoreOp {
+                persistent: true,
+                text: filled(turn.instruction, spoken),
+                // A persistent phrase adds. It does not wipe other saved preferences.
+                append: true,
+            }),
+            paste: has_source.then_some(paste_text).flatten(),
+            event: InstructionEvent::PersistentUpdated,
+        },
+        ModelAction::ClearSession => Decision::clear(InstructionEvent::ClearedSession),
+        ModelAction::ClearPersistent => Decision::clear(InstructionEvent::ClearedPersistent),
+        ModelAction::ClearAll => Decision::clear(InstructionEvent::ClearedAll),
+        ModelAction::ApplyOnce => {
+            let applied = paste_text.is_some();
+            Decision {
+                store: None,
+                paste: paste_text,
+                event: if applied {
+                    InstructionEvent::Applied
+                } else {
+                    InstructionEvent::NoTextYet
+                },
+            }
+        }
+        ModelAction::Rewrite => {
+            let failed = paste_text.is_none();
+            Decision {
+                store: None,
+                paste: Some(paste_text.unwrap_or_else(|| bound(spoken))),
+                event: if failed {
+                    InstructionEvent::RequestFailed
+                } else {
+                    InstructionEvent::Applied
+                },
+            }
+        }
+        ModelAction::Ignore => Decision {
+            store: None,
             paste: None,
             event: InstructionEvent::NoTextYet,
-        };
-    }
-    apply_choice(choice, selected, cancelled)
-}
-
-fn choice_from_model(class: ModelClass, spoken: &str) -> Choice {
-    match class {
-        ModelClass::Session(text) => Choice::Remember {
-            persistent: false,
-            text: filled(text, spoken),
-            append: false,
         },
-        ModelClass::Persistent(text) => Choice::Remember {
-            persistent: true,
-            text: filled(text, spoken),
-            append: false,
-        },
-        ModelClass::ClearSession => Choice::Clear(InstructionEvent::ClearedSession),
-        ModelClass::ClearPersistent => Choice::Clear(InstructionEvent::ClearedPersistent),
-        ModelClass::ClearAll => Choice::Clear(InstructionEvent::ClearedAll),
-        ModelClass::ApplyOnce(text) => Choice::ApplyOnce(filled(text, spoken)),
-        ModelClass::Ignore => Choice::Ignore,
     }
 }
 
-fn choice_from_fallback(spoken: &str) -> Choice {
+fn decision_from_fallback(spoken: &str, notice: InstructionEvent) -> Decision {
     let normalized = normalize(spoken);
     if let Some(event) = clear_command(&normalized) {
-        return Choice::Clear(event);
+        return Decision::clear(event);
     }
     let phrase = bound(spoken);
     if is_one_shot(&normalized) {
-        return Choice::ApplyOnce(phrase);
+        return Decision {
+            store: None,
+            paste: None,
+            event: notice,
+        };
     }
     let persistent = wants_persistent(&normalized) && !wants_session(&normalized);
-    Choice::Remember {
-        persistent,
-        text: phrase,
-        append: wants_append(&normalized),
+    let append = wants_append(&normalized);
+    let style =
+        persistent || wants_session(&normalized) || contains_phrase(&normalized, "sound") || append;
+    if !style {
+        return Decision {
+            store: None,
+            paste: Some(phrase),
+            event: notice,
+        };
+    }
+    Decision {
+        store: Some(StoreOp {
+            persistent,
+            text: phrase,
+            append: persistent || append,
+        }),
+        paste: None,
+        event: if persistent {
+            InstructionEvent::PersistentUpdated
+        } else {
+            InstructionEvent::SessionUpdated
+        },
     }
 }
 
@@ -323,100 +509,90 @@ fn filled(text: String, spoken: &str) -> String {
     }
 }
 
-enum Choice {
-    Clear(InstructionEvent),
-    Remember {
-        persistent: bool,
-        text: String,
-        append: bool,
-    },
-    ApplyOnce(String),
-    Ignore,
-}
-
-fn apply_choice(
-    choice: Choice,
-    selected: Option<&str>,
-    cancelled: &dyn Fn() -> bool,
-) -> InstructionOutcome {
-    match choice {
-        Choice::Ignore => remember(InstructionEvent::NoTextYet, None),
-        Choice::Clear(event) => with_store(|state| {
-            match event {
-                InstructionEvent::ClearedAll => {
-                    state.session.clear();
-                    state.persistent.clear();
-                    save_persistent(&state.persistent);
-                }
-                InstructionEvent::ClearedPersistent => {
-                    state.persistent.clear();
-                    save_persistent(&state.persistent);
-                }
-                InstructionEvent::ClearedSession => state.session.clear(),
-                _ => {}
-            }
-            state.event = Some(event);
-            bump();
-            InstructionOutcome { paste: None, event }
-        }),
-        Choice::Remember {
-            persistent,
-            text,
-            append,
-        } => with_store(|state| {
-            if persistent {
-                store_phrase(&mut state.persistent, text, append);
-                save_persistent(&state.persistent);
-            } else {
-                store_phrase(&mut state.session, text, append);
-            }
-            let event = if persistent {
-                InstructionEvent::PersistentUpdated
-            } else {
-                InstructionEvent::SessionUpdated
-            };
-            state.event = Some(event);
-            bump();
-            InstructionOutcome { paste: None, event }
-        }),
-        Choice::ApplyOnce(phrase) => apply_once(phrase, selected, cancelled),
-    }
-}
-
-fn apply_once(
-    phrase: String,
-    selected: Option<&str>,
-    cancelled: &dyn Fn() -> bool,
-) -> InstructionOutcome {
-    let source = with_store(|state| {
-        selected
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| state.last_dictation.clone())
+fn mark_selection_notice() {
+    with_store(|state| {
+        if state.selection_notice_shown {
+            return;
+        }
+        state.selection_notice_shown = true;
+        state.selection_notice_pending = true;
+        save_state(state);
+        bump();
     });
-    let Some(source) = source else {
-        return remember(InstructionEvent::NoTextYet, None);
-    };
-    let mut instructions = with_store(|state| standing(state));
-    if !instructions.iter().any(|item| item == &phrase) {
-        instructions.push(phrase);
+}
+
+fn clip_source(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= SOURCE_CAP {
+        trimmed.to_string()
+    } else {
+        trimmed.chars().take(SOURCE_CAP).collect()
     }
-    if cancelled() {
-        return InstructionOutcome {
+}
+
+fn nonempty(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+struct StoreOp {
+    persistent: bool,
+    text: String,
+    append: bool,
+}
+
+struct Decision {
+    store: Option<StoreOp>,
+    paste: Option<String>,
+    event: InstructionEvent,
+}
+
+impl Decision {
+    fn clear(event: InstructionEvent) -> Self {
+        Self {
+            store: None,
             paste: None,
-            event: InstructionEvent::NoTextYet,
-        };
+            event,
+        }
     }
-    let rewrite = llm_backend::rewrite(&source, &instructions, cancelled);
-    if cancelled() || !rewrite.called_model {
-        let event = match rewrite.notice {
-            RewriteNotice::MissingKey | RewriteNotice::None => InstructionEvent::WaitingForModel,
-            RewriteNotice::Failed => InstructionEvent::RequestFailed,
-        };
-        return remember(event, None);
-    }
-    remember(InstructionEvent::Applied, Some(rewrite.text))
+}
+
+fn apply_decision(decision: Decision) -> InstructionOutcome {
+    let Decision {
+        store,
+        paste,
+        event,
+    } = decision;
+    with_store(|state| {
+        match event {
+            InstructionEvent::ClearedAll => {
+                state.session.clear();
+                state.persistent.clear();
+                save_state(state);
+            }
+            InstructionEvent::ClearedPersistent => {
+                state.persistent.clear();
+                save_state(state);
+            }
+            InstructionEvent::ClearedSession => state.session.clear(),
+            _ => {}
+        }
+        if let Some(op) = store {
+            if op.persistent {
+                store_phrase(&mut state.persistent, op.text, op.append);
+                save_state(state);
+            } else {
+                store_phrase(&mut state.session, op.text, op.append);
+            }
+        }
+        state.event = Some(event);
+        bump();
+        InstructionOutcome { paste, event }
+    })
 }
 
 fn remember(event: InstructionEvent, paste: Option<String>) -> InstructionOutcome {
@@ -456,7 +632,13 @@ fn ensure_loaded(state: &mut Store) {
         return;
     }
     state.loaded = true;
-    state.persistent = load_persistent();
+    let file = load_file();
+    state.selection_notice_shown = file.selection_notice_shown;
+    state.persistent = file
+        .instructions
+        .into_iter()
+        .map(|item| bound(&item))
+        .collect();
 }
 
 fn persist_path() -> PathBuf {
@@ -476,28 +658,22 @@ fn persist_path() -> PathBuf {
         .join("output-instructions.json")
 }
 
-fn load_persistent() -> Vec<String> {
+fn load_file() -> PersistentFile {
     let path = persist_path();
     let Ok(bytes) = fs::read(&path) else {
-        return Vec::new();
+        return PersistentFile::default();
     };
-    serde_json::from_slice::<PersistentFile>(&bytes)
-        .map(|file| {
-            file.instructions
-                .into_iter()
-                .map(|item| bound(&item))
-                .collect()
-        })
-        .unwrap_or_default()
+    serde_json::from_slice::<PersistentFile>(&bytes).unwrap_or_default()
 }
 
-fn save_persistent(instructions: &[String]) {
+fn save_state(state: &Store) {
     let path = persist_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let file = PersistentFile {
-        instructions: instructions.to_vec(),
+        instructions: state.persistent.clone(),
+        selection_notice_shown: state.selection_notice_shown,
     };
     let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
         return;
@@ -854,40 +1030,39 @@ mod tests {
     fn spanish_and_style(
         request: &crate::llm_backend::CapturedRequest,
     ) -> Result<crate::llm_backend::MockReply, String> {
-        let body = if request.prompt.contains("Classify this spoken") {
-            let utterance = request
-                .prompt
-                .rsplit_once("Utterance:\n")
-                .map(|(_, utterance)| utterance)
-                .unwrap_or(request.prompt.as_str());
-            let (action, instruction) = if utterance.contains("always write formally") {
-                ("persistent", "always write formally")
-            } else if utterance.contains("for now") {
-                ("session", "for now let's write formally")
-            } else {
-                ("apply_once", "translate this to Spanish")
-            };
-            let text = serde_json::json!({
-                "action": action,
-                "instruction": instruction,
-            })
-            .to_string();
-            serde_json::json!({
-                "candidates": [{
-                    "content": {
-                        "parts": [{ "text": text }]
-                    }
-                }]
-            })
-            .to_string()
+        let utterance = request
+            .prompt
+            .rsplit_once("Utterance:\n")
+            .map(|(_, utterance)| utterance)
+            .unwrap_or(request.prompt.as_str());
+        let (action, instruction, append, text) = if utterance.contains("always write formally") {
+            ("persistent", "always write formally", true, "")
+        } else if utterance.contains("for now") {
+            ("session", "for now let's write formally", false, "")
+        } else if utterance.contains("hello team") {
+            ("rewrite", "", false, "Hello, team.")
         } else {
             assert!(request.prompt.contains("always write formally"));
             assert!(request.prompt.contains("for now let's write formally"));
-            assert!(request.prompt.contains("translate this to Spanish"));
             assert!(request.prompt.contains("good morning"));
-            r#"{"candidates":[{"content":{"parts":[{"text":"Buenos días."}]}}]}"#.to_string()
+            (
+                "apply_once",
+                "translate this to Spanish",
+                false,
+                "Buenos días.",
+            )
         };
-        Ok(crate::llm_backend::MockReply { status: 200, body })
+        let content = serde_json::json!({
+            "action": action,
+            "instruction": instruction,
+            "append": append,
+            "text": text,
+        })
+        .to_string();
+        Ok(crate::llm_backend::MockReply {
+            status: 200,
+            body: crate::llm_backend::chat_json(&content),
+        })
     }
 
     #[test]
@@ -905,5 +1080,159 @@ mod tests {
                 assert_eq!(finish_talk("next note"), "next note");
             },
         );
+    }
+
+    #[test]
+    fn ordinary_speech_is_pasted_and_not_stored_when_the_model_is_missing() {
+        isolated(|| {
+            let outcome = accept("hello team", None);
+            assert_eq!(outcome.paste.as_deref(), Some("hello team"));
+            assert_eq!(outcome.event, InstructionEvent::WaitingForModel);
+            assert!(active().is_empty());
+        });
+    }
+
+    #[test]
+    fn ordinary_speech_is_rewritten_and_not_stored() {
+        isolated_with(
+            crate::llm_backend::begin_mock("test-key", spanish_and_style),
+            || {
+                accept("for now let's write formally", None);
+                let outcome = accept("hello team", None);
+                assert_eq!(outcome.paste.as_deref(), Some("Hello, team."));
+                assert_eq!(outcome.event, InstructionEvent::Applied);
+                assert_eq!(active().len(), 1);
+            },
+        );
+    }
+
+    #[test]
+    fn always_adds_a_saved_preference_instead_of_replacing_it() {
+        isolated(|| {
+            accept("always write formally", None);
+            accept("always be brief", None);
+            let saved: Vec<_> = active()
+                .into_iter()
+                .filter(|item| item.scope == InstructionScope::Persistent)
+                .map(|item| item.text)
+                .collect();
+            assert_eq!(
+                saved,
+                vec![
+                    "always write formally".to_string(),
+                    "always be brief".to_string()
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn a_model_persistent_instruction_still_appends_when_append_is_false() {
+        isolated_with(
+            crate::llm_backend::begin_mock("test-key", |request| {
+                let utterance = request
+                    .prompt
+                    .rsplit_once("Utterance:\n")
+                    .map(|(_, utterance)| utterance)
+                    .unwrap_or("");
+                let instruction = if utterance.contains("brief") {
+                    "be brief"
+                } else {
+                    "write formally"
+                };
+                let content = serde_json::json!({
+                    "action": "persistent",
+                    "instruction": instruction,
+                    "append": false,
+                    "text": "",
+                })
+                .to_string();
+                Ok(crate::llm_backend::MockReply {
+                    status: 200,
+                    body: crate::llm_backend::chat_json(&content),
+                })
+            }),
+            || {
+                accept("always write formally", None);
+                accept("always be brief", None);
+                assert_eq!(active().len(), 2);
+            },
+        );
+    }
+
+    #[test]
+    fn selected_text_is_capped_and_announced_once() {
+        isolated_with(
+            crate::llm_backend::begin_mock("test-key", |request| {
+                let source = request
+                    .prompt
+                    .split_once("Source:\n")
+                    .and_then(|(_, rest)| rest.split_once("\n\nUtterance:\n"))
+                    .map(|(source, _)| source)
+                    .unwrap_or("");
+                if source.chars().count() > 100 {
+                    assert!(source.chars().count() <= 4_000);
+                    assert!(source.chars().count() > 3_000);
+                }
+                let content = serde_json::json!({
+                    "action": "apply_once",
+                    "instruction": "shorten",
+                    "append": false,
+                    "text": "short",
+                })
+                .to_string();
+                Ok(crate::llm_backend::MockReply {
+                    status: 200,
+                    body: crate::llm_backend::chat_json(&content),
+                })
+            }),
+            || {
+                let long = "word ".repeat(2_000);
+                let outcome = accept("make this shorter", Some(&long));
+                assert_eq!(outcome.paste.as_deref(), Some("short"));
+                assert_eq!(
+                    take_selection_notice(),
+                    Some("Selected text is sent to our AI service.")
+                );
+                assert!(take_selection_notice().is_none());
+                accept("make this shorter", Some("again"));
+                assert!(take_selection_notice().is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn a_chip_can_be_dismissed() {
+        isolated(|| {
+            accept("for now let's write formally", None);
+            accept("also keep the greeting", None);
+            dismiss(InstructionScope::Session, "also keep the greeting");
+            assert_eq!(active().len(), 1);
+            assert_eq!(active()[0].text, "for now let's write formally");
+        });
+    }
+
+    #[test]
+    fn focus_change_blocks_paste_and_wayland_does_not() {
+        assert!(focus_allows_paste(
+            &FocusRead::Unreadable,
+            &FocusRead::App("other".into())
+        ));
+        assert!(focus_allows_paste(
+            &FocusRead::App("notes".into()),
+            &FocusRead::App("notes".into())
+        ));
+        assert!(!focus_allows_paste(
+            &FocusRead::App("notes".into()),
+            &FocusRead::App("browser".into())
+        ));
+        assert!(!focus_allows_paste(
+            &FocusRead::App("notes".into()),
+            &FocusRead::None
+        ));
+        assert!(focus_allows_paste(
+            &FocusRead::App("notes".into()),
+            &FocusRead::Unreadable
+        ));
     }
 }

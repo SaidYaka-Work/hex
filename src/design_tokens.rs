@@ -42,6 +42,9 @@ pub(crate) const SUCCESS_SURFACE: u32 = 0xe7f5ec;
 pub(crate) const DANGER: u32 = 0x9f1239;
 pub(crate) const DANGER_SURFACE: u32 = 0xfdecee;
 pub(crate) const DANGER_BORDER: u32 = 0xf3c3cb;
+/// Amber status, such as the AI-unavailable pill. Dark enough for the cream fill.
+pub(crate) const WARNING: u32 = 0x92400e;
+pub(crate) const WARNING_SURFACE: u32 = 0xfef3c7;
 
 /// One step of the type scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -101,7 +104,7 @@ pub(crate) const MONOSPACE_FAMILY: &str = "SF Mono";
 /// Bundled Instrument Sans. Body copy uses it once [`install_bundled_fonts`]
 /// has registered the file.
 pub(crate) const SANS_FAMILY: &str = "Instrument Sans";
-/// Bundled Instrument Serif for the wordmark and pane titles.
+/// Bundled Instrument Serif. The home wordmark is the only place that uses it.
 pub(crate) const SERIF_FAMILY: &str = "Instrument Serif";
 
 thread_local! {
@@ -110,6 +113,10 @@ thread_local! {
 
 /// Follows the system appearance for the current render.
 pub(crate) fn follow_window(window: &gpui::Window) {
+    if std::env::var_os("HEX_FORCE_DARK").is_some_and(|value| value == "1") {
+        set_dark(true);
+        return;
+    }
     set_dark(matches!(
         window.appearance(),
         WindowAppearance::Dark | WindowAppearance::VibrantDark
@@ -124,12 +131,12 @@ fn dark_theme() -> bool {
     DARK.with(Cell::get)
 }
 
-const DARK_SIDEBAR: u32 = 0x141210;
-const DARK_SIDEBAR_HOVER: u32 = 0x2c2822;
-const DARK_CANVAS: u32 = 0x1c1916;
-const DARK_SURFACE: u32 = 0x26221c;
-const DARK_SURFACE_HOVER: u32 = 0x322c24;
-const DARK_LINE: u32 = 0x3d362c;
+const DARK_SIDEBAR: u32 = 0x100e0c;
+const DARK_SIDEBAR_HOVER: u32 = 0x241f1b;
+const DARK_CANVAS: u32 = 0x0c0b0a;
+const DARK_SURFACE: u32 = 0x151311;
+const DARK_SURFACE_HOVER: u32 = 0x221e1a;
+const DARK_LINE: u32 = 0x3a342e;
 const DARK_LINE_STRONG: u32 = 0x564c40;
 const DARK_SCRIM: u32 = 0x0c0b09cc;
 const DARK_TEXT_PRIMARY: u32 = 0xf4efe6;
@@ -147,6 +154,8 @@ const DARK_SUCCESS_SURFACE: u32 = 0x14281c;
 const DARK_DANGER: u32 = 0xfb7185;
 const DARK_DANGER_SURFACE: u32 = 0x2a1218;
 const DARK_DANGER_BORDER: u32 = 0x6b3040;
+const DARK_WARNING: u32 = 0xfbbf24;
+const DARK_WARNING_SURFACE: u32 = 0x3a2a14;
 
 /// The colour to paint. Light values stay as written; a dark system appearance
 /// maps each token. Call [`follow_window`] at the start of a render.
@@ -179,6 +188,8 @@ pub(crate) fn paint(light: u32) -> u32 {
         DANGER => DARK_DANGER,
         DANGER_SURFACE => DARK_DANGER_SURFACE,
         DANGER_BORDER => DARK_DANGER_BORDER,
+        WARNING => DARK_WARNING,
+        WARNING_SURFACE => DARK_WARNING_SURFACE,
         _ => light,
     }
 }
@@ -238,11 +249,11 @@ pub(crate) trait Typography: Styled + Sized {
     }
 
     fn text_headline(self) -> Self {
-        self.text_step(HEADLINE).font_family(SERIF_FAMILY)
+        self.text_step(HEADLINE).font_family(SANS_FAMILY)
     }
 
     fn text_title(self) -> Self {
-        self.text_step(TITLE).font_family(SERIF_FAMILY)
+        self.text_step(TITLE).font_family(SANS_FAMILY)
     }
 
     fn text_display(self) -> Self {
@@ -267,6 +278,8 @@ pub(crate) const RADIUS_SMALL: Pixels = px(4.0);
 pub(crate) const RADIUS_CONTROL: Pixels = px(8.0);
 /// Buttons only. Half of [`CONTROL_HEIGHT_LARGE`], so the home actions are pills.
 pub(crate) const RADIUS_PILL: Pixels = px(22.0);
+/// The two home action cards.
+pub(crate) const RADIUS_CARD: Pixels = px(22.0);
 pub(crate) const RADIUS_PANEL: Pixels = px(16.0);
 pub(crate) const RADIUS_MODAL: Pixels = px(12.0);
 pub(crate) const RADIUS_KNOB: Pixels = px(2.0);
@@ -313,14 +326,22 @@ pub(crate) const PANE_HEADER_HEIGHT: f32 = 70.0;
 pub(crate) const PANE_GUTTER: f32 = 32.0;
 /// The one content width every pane is bounded to.
 pub(crate) const PANE_CONTENT_WIDTH: f32 = 940.0;
-/// The home column.
+/// The home column. The simplified window is narrower than this.
 pub(crate) const HOME_COLUMN: f32 = 420.0;
 /// The widest active-instruction row on the home.
 pub(crate) const HOME_INSTRUCTION: f32 = 360.0;
-/// The settings sheet on the home.
-pub(crate) const SETTINGS_SHEET: f32 = 560.0;
-/// Tallest the sheet grows before its body scrolls, inside the default window.
-pub(crate) const SETTINGS_SHEET_MAX_HEIGHT: f32 = 620.0;
+/// The running Said.ai window. Preview keeps the classic shell size.
+pub(crate) const HOME_WINDOW_WIDTH: f32 = 440.0;
+pub(crate) const HOME_WINDOW_HEIGHT: f32 = 560.0;
+/// The voice orb and the soft glow behind it.
+pub(crate) const ORB_SIZE: f32 = 72.0;
+pub(crate) const ORB_GLOW: f32 = 220.0;
+/// A home action card.
+pub(crate) const ACTION_CARD_HEIGHT: f32 = 132.0;
+/// The settings sheet on the home. It fits inside [`HOME_WINDOW_WIDTH`].
+pub(crate) const SETTINGS_SHEET: f32 = 400.0;
+/// Tallest the sheet grows before its body scrolls, inside the home window.
+pub(crate) const SETTINGS_SHEET_MAX_HEIGHT: f32 = 520.0;
 /// The list column of a list+detail pane.
 pub(crate) const PANE_LIST_WIDTH: f32 = 320.0;
 /// The narrower list column for panes whose detail is an editor (Modes).
@@ -453,6 +474,7 @@ mod tests {
             (ACCENT_TEXT, ACCENT_SURFACE),
             (SUCCESS, SUCCESS_SURFACE),
             (DANGER, DANGER_SURFACE),
+            (WARNING, WARNING_SURFACE),
         ] {
             let ratio = contrast(text, surface);
             assert!(ratio >= 4.5, "{text:06x} on {surface:06x} is {ratio:.2}:1");
@@ -481,6 +503,7 @@ mod tests {
             (ACCENT_TEXT, ACCENT_SURFACE),
             (SUCCESS, SUCCESS_SURFACE),
             (DANGER, DANGER_SURFACE),
+            (WARNING, WARNING_SURFACE),
         ] {
             let ratio = contrast(paint(text), paint(surface));
             assert!(

@@ -26,13 +26,19 @@ HEX                                      // macOS release
 
 The running window is Said.ai. Talk holds the dictation shortcut and pastes
 local Parakeet English. Talk never calls a language model. Talk to AI holds
-the second shortcut. When `GEMINI_API_KEY` is set, `llm_backend::LLM_BACKEND`
-(provider Gemini Flash, model `gemini-3.5-flash-lite`) classifies the
-utterance and rewrites one-shots. Session and saved instructions are included
-in that rewrite. Saying only "write formally" stores the instruction and does
-not change later Talk dictation. A missing key shows "AI is not configured"
-and leaves the dictated text unchanged. History retention, voice commands, and
-mode processing are forced off on load. Saved mode text is kept and not applied.
+the second shortcut and asks `llm_backend::LLM_SLOT` for one JSON chat
+completion. The baked slot is Google's OpenAI-compatible endpoint
+(`https://generativelanguage.googleapis.com/v1beta/openai`, model
+`gemini-3.5-flash-lite`, key variable `GEMINI_API_KEY`). OpenRouter is the
+same client with base `https://openrouter.ai/api/v1` and a model id such as
+`google/gemini-3.5-flash-lite`. `SAID_AI_CONFIG_URL` can replace the slot at
+startup (cached as `ai-slot.json`); `SAID_AI_BASE_URL`, `SAID_AI_MODEL`, and
+`SAID_AI_KEY_VARIABLE` override it. The window never names a model or
+provider. A missing key shows "AI unavailable right now". Ordinary Talk to AI
+speech is rewritten with the active instructions and pasted. "for now" and
+"always" store chips; "always" adds to saved preferences. Talk dictation is
+unchanged by those chips. History retention, voice commands, and mode
+processing are forced off on load. Saved mode text is kept and not applied.
 History, Commands, and Modes are not in the window and have no hotkeys.
 Transcription is pinned to Parakeet Unified English, including the first-run
 download, and there is no model or provider picker. Preview fixtures can still
