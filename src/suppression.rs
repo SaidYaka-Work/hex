@@ -727,6 +727,8 @@ impl DictationHotkey {
     }
 
     /// The next click finishes a capture that [`Self::arm_click`] locked.
+    /// The home loop calls [`Self::finish_from_home`] directly.
+    #[allow(dead_code)]
     pub fn release_click(&mut self) -> Option<HotkeyAction> {
         if !matches!(self.state, State::Locked) {
             return None;

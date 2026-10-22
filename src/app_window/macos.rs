@@ -564,6 +564,7 @@ pub fn commit_transcription_selection(
     Ok(settings)
 }
 
+#[allow(dead_code)]
 pub fn menu_transcription_selection(
     app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
     model: TranscriptionModelId,

@@ -899,6 +899,7 @@ fn default_transcription() -> TranscriptionSelection {
 }
 
 impl AppSettings {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn transcription_for_model(&self, id: TranscriptionModelId) -> TranscriptionSelection {
         if self.transcription.model == id {
             return self.transcription.clone();
@@ -1526,6 +1527,7 @@ pub fn edit_hotkey() -> Option<RuntimeHotkey> {
     runtime_hotkeys().edit
 }
 
+#[allow(dead_code)]
 pub fn voice_action_settings() -> VoiceActionSettings {
     VOICE_ACTION_SETTINGS
         .get_or_init(Default::default)

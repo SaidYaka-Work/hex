@@ -331,10 +331,6 @@ pub(crate) const PANE_HEADER_HEIGHT: f32 = 70.0;
 pub(crate) const PANE_GUTTER: f32 = 32.0;
 /// The one content width every pane is bounded to.
 pub(crate) const PANE_CONTENT_WIDTH: f32 = 940.0;
-/// The home column. The simplified window is narrower than this.
-pub(crate) const HOME_COLUMN: f32 = 420.0;
-/// The widest active-instruction row on the home.
-pub(crate) const HOME_INSTRUCTION: f32 = 360.0;
 /// The running Said.ai window. Preview keeps the classic shell size.
 pub(crate) const HOME_WINDOW_WIDTH: f32 = 440.0;
 pub(crate) const HOME_WINDOW_HEIGHT: f32 = 560.0;

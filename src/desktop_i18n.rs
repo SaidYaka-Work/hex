@@ -62,7 +62,7 @@ pub(crate) fn system_language() -> String {
 }
 
 /// `pt-BR` and `zh-Hans-CN` yield `pt` and `zh`.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[allow(dead_code)]
 fn primary_subtag(tag: &str) -> Option<String> {
     let subtag = tag.split(['-', '_']).next()?.trim().to_ascii_lowercase();
     (!subtag.is_empty()).then_some(subtag)

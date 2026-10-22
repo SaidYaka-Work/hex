@@ -44,7 +44,7 @@ mod dictation_diagnostics;
 mod dictation_indicator;
 // Preview editors and their tests still build mode runtimes. Talk does not.
 mod dictation_modes;
-#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+#[allow(dead_code)]
 mod dictation_processor;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod events;

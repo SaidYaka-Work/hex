@@ -516,7 +516,7 @@ fn run_output_worker(
                 && !crate::output_instructions::copy_for_self(&text, &current_focus())
             {
                 let commit = || true;
-                let _ = paster.paste(&text, PasteMode::Standalone, &commit);
+                let _ = paster.paste(&text, PasteMode::Standalone, commit);
             }
             continue;
         }

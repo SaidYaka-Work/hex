@@ -935,6 +935,7 @@ pub fn parakeet_english() -> TranscriptionSelection {
 /// recommended runtime model. Unknown languages fall back to English, so an
 /// English system starts with Parakeet Unified English. The app no longer
 /// offers this choice; [`parakeet_english`] is what a launch uses.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn recommended_selection(language: &str) -> TranscriptionSelection {
     let language = LANGUAGES
         .iter()

@@ -97,8 +97,7 @@ mod tour;
 pub use platform::open;
 #[cfg(target_os = "macos")]
 pub use platform::{
-    commit_transcription_selection, menu_transcription_selection, open_or_focus, open_preview,
-    refresh_transcription_menu,
+    commit_transcription_selection, open_or_focus, open_preview, refresh_transcription_menu,
 };
 
 /// What the current OS's runtime can do. A missing capability omits its
@@ -2054,7 +2053,7 @@ impl AppWindow {
         self.select_pane(Pane::Settings, cx);
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn show_transcription_models(&mut self, cx: &mut Context<Self>) {
         self.show_settings(cx);
         self.transcription_picker_language = Some(self.settings.transcription.language.clone());
@@ -7456,6 +7455,7 @@ impl AppWindow {
         }
     }
 
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn listener_running(&self) -> bool {
         self.platform_listener()
             .is_some_and(|listener| listener.running)

@@ -83,6 +83,7 @@ impl ModeRuntime {
 }
 
 /// The history entry for one pasted dictation.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn history_draft(
     raw_text: String,
     processed: &Processed,
