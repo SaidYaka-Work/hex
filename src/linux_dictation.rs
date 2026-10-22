@@ -333,6 +333,44 @@ pub fn run(
                 &device_label,
             )?;
         }
+        for request in crate::home_capture::take() {
+            if finishing.is_some() {
+                continue;
+            }
+            if capture.is_recording() {
+                finishing = Some(begin_finishing(&capture, captured_through, recording_voice));
+                continue;
+            }
+            if start_pending {
+                start_pending = false;
+                recording_voice = false;
+                suppressor.restore();
+                input.close();
+                audio_ready = false;
+                continue;
+            }
+            let voice = matches!(request, crate::home_capture::HomeRequest::TalkToAi);
+            ai_cancel.store(false, Ordering::Release);
+            crate::output_instructions::clear_inflight_cancel();
+            recording_voice = voice;
+            if audio_ready {
+                start_capture(&mut capture, captured_through, |_| {
+                    if !recording_voice {
+                        feedback::play_provisional_start();
+                    }
+                });
+                stream_when_due(&mut capture, &engine, toggle);
+            } else if release_while_idle {
+                start_pending = true;
+                input.request_open();
+                feedback::prepare();
+            } else {
+                continue;
+            }
+            suppressor.suppress();
+            events.dictation(DictationPhase::Started, "")?;
+            emit_state(&mut events, VoiceState::Dictating, &device_label)?;
+        }
         while finishing.is_none()
             && let Ok(action) = hotkey.events.try_recv()
         {
@@ -341,6 +379,7 @@ pub fn run(
                     if !capture.is_recording() && !start_pending =>
                 {
                     ai_cancel.store(false, Ordering::Release);
+                    crate::output_instructions::clear_inflight_cancel();
                     recording_voice = action == HotkeyEvent::VoiceStart;
                     if audio_ready {
                         // An instruction plays no start tone, as on Windows.
@@ -366,6 +405,7 @@ pub fn run(
                 {
                     if action == HotkeyEvent::Cancel {
                         ai_cancel.store(true, Ordering::Release);
+                        crate::output_instructions::cancel_inflight();
                     }
                     recording_voice = false;
                     // Released before the opening microphone produced audio:
@@ -400,6 +440,7 @@ pub fn run(
                 }
                 HotkeyEvent::Cancel if capture.is_recording() => {
                     ai_cancel.store(true, Ordering::Release);
+                    crate::output_instructions::cancel_inflight();
                     recording_voice = false;
                     capture.cancel();
                     feedback::retract_start();
@@ -418,6 +459,7 @@ pub fn run(
                 }
                 HotkeyEvent::Cancel => {
                     ai_cancel.store(true, Ordering::Release);
+                    crate::output_instructions::cancel_inflight();
                 }
                 _ => {}
             }
@@ -450,6 +492,13 @@ pub fn run(
             )?;
         }
 
+        crate::home_capture::set_active((capture.is_recording() || start_pending).then_some(
+            if recording_voice {
+                crate::home_capture::HomeRequest::TalkToAi
+            } else {
+                crate::home_capture::HomeRequest::Talk
+            },
+        ));
         indicator.update(
             capture.is_recording() || start_pending,
             pending,
@@ -481,6 +530,9 @@ pub fn run(
                     }
                 }
                 capture.ingest(&samples, captured_through);
+                if capture.is_recording() {
+                    crate::home_capture::publish_level(&samples);
+                }
                 capture.become_intentional(captured_through);
                 stream_when_due(&mut capture, &engine, toggle);
             }

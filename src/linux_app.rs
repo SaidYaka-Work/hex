@@ -955,6 +955,19 @@ impl LinuxDesktopHost {
                 self.start();
             }
             DesktopAction::StopListening => self.stop(),
+            DesktopAction::ToggleCapture { voice_action } => {
+                self.error = None;
+                if !self.is_running() {
+                    self.dismissed_failure_at =
+                        self.activity.last_failure.as_ref().map(|(at, _)| *at);
+                    self.start();
+                }
+                crate::home_capture::request(if voice_action {
+                    crate::home_capture::HomeRequest::TalkToAi
+                } else {
+                    crate::home_capture::HomeRequest::Talk
+                });
+            }
         }
         Ok(())
     }

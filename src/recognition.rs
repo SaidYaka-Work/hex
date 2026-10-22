@@ -325,6 +325,12 @@ pub fn listen(
         edit: crate::app_settings::edit_hotkey()
             .map(|binding| DictationHotkey::new_without_paste(CaptureInstant::now(), binding)),
     };
+    // Click-only Talk to AI when the shortcut machine is absent. Its binding
+    // is never fed physical events, so it cannot steal the Talk chord.
+    let mut ai_click = DictationHotkey::new_without_paste(
+        CaptureInstant::now(),
+        crate::app_settings::dictation_hotkey(),
+    );
     hotkeys
         .dictation
         .set_double_tap_only(crate::app_settings::double_tap_only());
@@ -877,6 +883,9 @@ pub fn listen(
                 )?;
                 continue;
             }
+            if !hotkeys.any_recording() && input_event.is_escape_down() {
+                crate::output_instructions::cancel_inflight();
+            }
             if !hotkeys.any_recording()
                 && input_event.is_escape_down()
                 && let Some(job_id) = dictation_worker.cancel_latest()
@@ -1015,6 +1024,29 @@ pub fn listen(
         {
             hotkeys.recover_stale_keys();
         }
+        if !hotkey_capture_suspended && programmatic.is_none() && voice.is_none() {
+            drain_home_clicks(
+                &mut hotkeys,
+                &mut ai_click,
+                &mut edit_context,
+                &mut recognizer,
+                &input,
+                &dictation_worker,
+                mode,
+                &context,
+                &mut events,
+                indicator.as_ref(),
+                microphone_policy.release_while_idle,
+            )?;
+        }
+        let home_kind = if hotkeys.edit_recording() || ai_click.is_recording() {
+            Some(crate::home_capture::HomeRequest::TalkToAi)
+        } else if hotkeys.dictation.is_recording() {
+            Some(crate::home_capture::HomeRequest::Talk)
+        } else {
+            None
+        };
+        crate::home_capture::set_active(home_kind);
         if hotkeys.dictation.is_recording()
             && edit_pending_since.is_none()
             && input.become_intentional(capture_boundary(
@@ -1238,6 +1270,9 @@ pub fn listen(
         if let Some(audio) = audio.filter(|audio| audio.is_current(input.recognition_generation()))
         {
             let suppress_non_voice = programmatic.is_some() || hotkeys.suppresses_recognition();
+            if voice.is_some() || hotkeys.any_recording() || ai_click.is_recording() {
+                crate::home_capture::publish_level(&audio.samples);
+            }
             if (voice.is_some() || suppress_non_voice)
                 && let Some(indicator) = &indicator
             {
@@ -1545,6 +1580,131 @@ fn start_voice_capture(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn drain_home_clicks(
+    hotkeys: &mut Hotkeys,
+    ai_click: &mut DictationHotkey,
+    edit_context: &mut Option<ContextSnapshot>,
+    recognizer: &mut Option<Moonshine>,
+    dictation: &DictationAudio,
+    worker: &DictationWorker,
+    mode: Mode,
+    context: &ContextSnapshot,
+    events: &mut EventLog,
+    indicator: Option<&DictationIndicatorSender>,
+    release_while_idle: bool,
+) -> Result<()> {
+    for request in crate::home_capture::take() {
+        if hotkeys.dictation.is_recording() {
+            if let Some(action) = hotkeys.dictation.finish_from_home() {
+                handle_hotkey_action(
+                    action,
+                    CaptureInstant::now(),
+                    recognizer,
+                    dictation,
+                    worker,
+                    mode,
+                    context,
+                    &dictation.device_name(),
+                    events,
+                    indicator,
+                    release_while_idle,
+                )?;
+            }
+            continue;
+        }
+        if hotkeys.edit_recording() {
+            if let Some(edit) = hotkeys.edit.as_mut()
+                && let Some(action) = edit.finish_from_home()
+            {
+                handle_edit_hotkey_action(
+                    action,
+                    CaptureInstant::now(),
+                    edit_context,
+                    recognizer,
+                    dictation,
+                    worker,
+                    mode,
+                    context,
+                    &dictation.device_name(),
+                    events,
+                    indicator,
+                )?;
+            }
+            continue;
+        }
+        if ai_click.is_recording() {
+            if let Some(action) = ai_click.finish_from_home() {
+                handle_edit_hotkey_action(
+                    action,
+                    CaptureInstant::now(),
+                    edit_context,
+                    recognizer,
+                    dictation,
+                    worker,
+                    mode,
+                    context,
+                    &dictation.device_name(),
+                    events,
+                    indicator,
+                )?;
+            }
+            continue;
+        }
+        match request {
+            crate::home_capture::HomeRequest::Talk => {
+                if let Some(action) = hotkeys.dictation.arm_click() {
+                    let accepted = handle_hotkey_action(
+                        action,
+                        CaptureInstant::now(),
+                        recognizer,
+                        dictation,
+                        worker,
+                        mode,
+                        context,
+                        &dictation.device_name(),
+                        events,
+                        indicator,
+                        release_while_idle,
+                    )?;
+                    if !accepted {
+                        let _ = hotkeys.dictation.finish_from_home();
+                    }
+                }
+            }
+            crate::home_capture::HomeRequest::TalkToAi => {
+                let action = if let Some(edit) = hotkeys.edit.as_mut() {
+                    edit.arm_click()
+                } else {
+                    ai_click.arm_click()
+                };
+                if let Some(action) = action {
+                    let accepted = handle_edit_hotkey_action(
+                        action,
+                        CaptureInstant::now(),
+                        edit_context,
+                        recognizer,
+                        dictation,
+                        worker,
+                        mode,
+                        context,
+                        &dictation.device_name(),
+                        events,
+                        indicator,
+                    )?;
+                    if !accepted {
+                        if let Some(edit) = hotkeys.edit.as_mut() {
+                            let _ = edit.finish_from_home();
+                        }
+                        let _ = ai_click.finish_from_home();
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_hotkey_action(
     action: HotkeyAction,
     action_at: CaptureInstant,
@@ -1560,6 +1720,7 @@ fn handle_hotkey_action(
 ) -> Result<bool> {
     match action {
         HotkeyAction::Start => {
+            crate::output_instructions::clear_inflight_cancel();
             if !dictation.start(action_at)? {
                 return Ok(false);
             }
@@ -1601,6 +1762,9 @@ fn handle_hotkey_action(
             emit_engine_state(events, false, worker, mode, device)
         }
         HotkeyAction::Discard | HotkeyAction::Cancel => {
+            if matches!(action, HotkeyAction::Cancel) {
+                crate::output_instructions::cancel_inflight();
+            }
             feedback::retract_start();
             end_capture(
                 if matches!(action, HotkeyAction::Cancel) {
@@ -1659,17 +1823,14 @@ fn handle_edit_hotkey_action(
 ) -> Result<bool> {
     match action {
         HotkeyAction::Start => {
-            if !admit_voice_action(
-                crate::dictation_processor::opencode_installed(),
-                edit_context,
-                || {
-                    dictation.cancel()?;
-                    reset_command_recognizer(dictation, recognizer)
-                },
-            )? {
+            crate::output_instructions::clear_inflight_cancel();
+            if !admit_voice_action(true, edit_context, || {
+                dictation.cancel()?;
+                reset_command_recognizer(dictation, recognizer)
+            })? {
                 feedback::play(Tone::Error);
                 events.dictation(
-                    DictationPhase::Failed("Voice Action requires OpenCode".into()),
+                    DictationPhase::Failed("Talk to AI could not start".into()),
                     "",
                 )?;
                 emit_engine_state(events, false, worker, mode, device)?;
@@ -1723,6 +1884,9 @@ fn handle_edit_hotkey_action(
             Ok(true)
         }
         HotkeyAction::Discard | HotkeyAction::Cancel => {
+            if matches!(action, HotkeyAction::Cancel) {
+                crate::output_instructions::cancel_inflight();
+            }
             *edit_context = None;
             end_capture(
                 if matches!(action, HotkeyAction::Cancel) {

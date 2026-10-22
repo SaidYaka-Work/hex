@@ -393,7 +393,6 @@ impl AppWindow {
     }
 
     fn render_setup_row(&mut self, row: Row, last: bool, cx: &mut Context<Self>) -> Div {
-        let model = crate::transcription_models::validate(&self.settings.transcription).ok();
         let waiting = row.status == ItemStatus::Waiting;
         let (glyph, title, description): (Icon, &'static str, String) = match row.item {
             SetupItem::Microphone => (
@@ -432,12 +431,11 @@ impl AppWindow {
             SetupItem::Model => (
                 Icon::Waveform,
                 tr("Speech model"),
-                match (row.status, model) {
-                    (ItemStatus::Failed, _) => {
+                match row.status {
+                    ItemStatus::Failed => {
                         tr("The download stopped. Check your connection and try again.").into()
                     }
-                    (_, Some(model)) => format!("{} · {}", model.name, model.size_label()),
-                    (_, None) => tr("Runs entirely on this computer").into(),
+                    _ => tr("Runs entirely on this computer").into(),
                 },
             ),
         };
@@ -783,7 +781,7 @@ impl AppWindow {
             tips.push((
                 self.settings.edit_hotkey.keycaps(),
                 tr("Voice Action"),
-                tr("Ask OpenCode to write or rewrite. Turn it on in Voice Action."),
+                tr("Ask Said.ai to write or rewrite. Turn it on in Talk to AI."),
             ));
         }
         if platform::CAPABILITIES.modes {

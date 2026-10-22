@@ -24,25 +24,49 @@ HEX                                      // macOS release
 └── Maintain the app                     // menu bar, login, updates, quit
 ```
 
-The running window is Said.ai. Talk holds the dictation shortcut and pastes
-local Parakeet English. Talk never calls a language model. Talk to AI holds
-the second shortcut and asks `llm_backend::LLM_SLOT` for one JSON chat
-completion. The baked slot is Google's OpenAI-compatible endpoint
-(`https://generativelanguage.googleapis.com/v1beta/openai`, model
+The running window is Said.ai. Talk holds the dictation shortcut, or the Talk
+card, and pastes local speech. Talk never calls a language model. Talk to AI
+holds the second shortcut, or its card, and asks `llm_backend::LLM_SLOT` for
+one JSON chat completion. The baked slot is Google's OpenAI-compatible
+endpoint (`https://generativelanguage.googleapis.com/v1beta/openai`, model
 `gemini-3.5-flash-lite`, key variable `GEMINI_API_KEY`). OpenRouter is the
-same client with base `https://openrouter.ai/api/v1` and a model id such as
-`google/gemini-3.5-flash-lite`. `SAID_AI_CONFIG_URL` can replace the slot at
-startup (cached as `ai-slot.json`); `SAID_AI_BASE_URL`, `SAID_AI_MODEL`, and
-`SAID_AI_KEY_VARIABLE` override it. The window never names a model or
-provider. A missing key shows "AI unavailable right now". Ordinary Talk to AI
-speech is rewritten with the active instructions and pasted. "for now" and
-"always" store chips; "always" adds to saved preferences. Talk dictation is
-unchanged by those chips. History retention, voice commands, and mode
-processing are forced off on load. Saved mode text is kept and not applied.
-History, Commands, and Modes are not in the window and have no hotkeys.
-Transcription is pinned to Parakeet Unified English, including the first-run
-download, and there is no model or provider picker. Preview fixtures can still
-render the previous pane contents; the navigation list does not.
+same client with base `https://openrouter.ai/api/v1`. The window never names
+a model or provider.
+
+Remote config (`SAID_AI_CONFIG_URL`, cached as `ai-slot.json`) may change
+`base_url` and `model` only. The host must be `generativelanguage.googleapis.com`,
+`openrouter.ai`, or the placeholder `ai.saidyaka.com`, with no port and no
+userinfo, and the document must carry an ed25519 signature under the public
+key baked into the app. Remote config cannot change `key_variable`. An
+unsigned, invalid, or off-list document is ignored, and the cache is checked
+with the same rules. `SAID_AI_BASE_URL` must also be allowlisted.
+`SAID_AI_KEY_VARIABLE` is a local override and is never taken from the
+network. The matching private key is not in this repo, so a remote document
+stays ignored until the owner replaces the public key and signs one. A proxy
+at `ai.saidyaka.com` is the planned place that would hold the key and the
+model id. It is not deployed.
+
+The model sees the spoken request and any selected text, never the last Talk
+transcript. An utterance that is only an instruction updates the chip and
+pastes nothing. The cloud notice is on screen before the first Talk to AI
+send, and Continue is what allows that send. If the focused window cannot be
+confirmed (Wayland, a failed read, or Windows with no foreground process), the
+result is copied to the clipboard and a notice is shown instead of a
+keystroke. `max_tokens` is about three times the estimated input, with a floor
+of 1500. A provider that rejects JSON mode is retried once without
+`response_format`. Whether a key is present is an environment read and does
+not wait on a config fetch. `HEX_HOME_STAGE` exists only in debug builds, for
+screenshots.
+
+A missing key shows "AI unavailable right now". Ordinary Talk to AI speech is
+rewritten with the active instructions and pasted. "for now" and "always"
+store chips; "always" adds to saved preferences. Talk dictation is unchanged
+by those chips. History retention, voice commands, and mode processing are
+forced off on load. Saved mode text is kept and not applied. History,
+Commands, and Modes are not in the window and have no hotkeys. Transcription
+is pinned to the one local English model, including the first-run download,
+and there is no model or provider picker. Preview fixtures can still render
+the previous pane contents; the navigation list does not.
 
 [Dictation](dictation.md), [Voice Commands](commands.md),
 [Voice Action](voice-action.md), [Meetings](meetings.md), and [Recovery](recovery.md)

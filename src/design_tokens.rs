@@ -35,6 +35,9 @@ pub(crate) const ON_ACCENT: u32 = 0xfffef9;
 pub(crate) const ACCENT_TEXT: u32 = 0x8c3f28;
 pub(crate) const ACCENT_SURFACE: u32 = 0xf8ebe3;
 pub(crate) const ACCENT_BORDER: u32 = 0xe7d3c6;
+/// Warm end of the home orb. GPUI has no radial gradient, so the orb fades
+/// from [`ACCENT`] toward this colour.
+pub(crate) const ORB_WARM: u32 = 0xe8a87c;
 /// Text selection highlight: ink at low opacity.
 pub(crate) const SELECTION: u32 = 0x16161333;
 pub(crate) const SUCCESS: u32 = 0x166534;
@@ -148,6 +151,7 @@ const DARK_ON_ACCENT: u32 = 0x161613;
 const DARK_ACCENT_TEXT: u32 = 0xe8a87c;
 const DARK_ACCENT_SURFACE: u32 = 0x2a1a12;
 const DARK_ACCENT_BORDER: u32 = 0x6b4632;
+const DARK_ORB_WARM: u32 = 0xf6d3b0;
 const DARK_SELECTION: u32 = 0xf4efe633;
 const DARK_SUCCESS: u32 = 0x86efac;
 const DARK_SUCCESS_SURFACE: u32 = 0x14281c;
@@ -182,6 +186,7 @@ pub(crate) fn paint(light: u32) -> u32 {
         ACCENT_TEXT => DARK_ACCENT_TEXT,
         ACCENT_SURFACE => DARK_ACCENT_SURFACE,
         ACCENT_BORDER => DARK_ACCENT_BORDER,
+        ORB_WARM => DARK_ORB_WARM,
         SELECTION => DARK_SELECTION,
         SUCCESS => DARK_SUCCESS,
         SUCCESS_SURFACE => DARK_SUCCESS_SURFACE,
@@ -335,9 +340,9 @@ pub(crate) const HOME_WINDOW_WIDTH: f32 = 440.0;
 pub(crate) const HOME_WINDOW_HEIGHT: f32 = 560.0;
 /// The voice orb and the soft glow behind it.
 pub(crate) const ORB_SIZE: f32 = 72.0;
-pub(crate) const ORB_GLOW: f32 = 220.0;
+pub(crate) const ORB_GLOW: f32 = 168.0;
 /// A home action card.
-pub(crate) const ACTION_CARD_HEIGHT: f32 = 132.0;
+pub(crate) const ACTION_CARD_HEIGHT: f32 = 116.0;
 /// The settings sheet on the home. It fits inside [`HOME_WINDOW_WIDTH`].
 pub(crate) const SETTINGS_SHEET: f32 = 400.0;
 /// Tallest the sheet grows before its body scrolls, inside the home window.

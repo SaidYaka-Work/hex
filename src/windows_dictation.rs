@@ -329,6 +329,73 @@ pub fn run_with_transcriber(
                 audio_ready = false;
             }
         }
+        for request in crate::home_capture::take() {
+            if finishing.is_some() {
+                continue;
+            }
+            if recording {
+                if let Some(suppressor) = &audio_suppressor {
+                    suppressor.restore();
+                }
+                recording = false;
+                finishing = Some(begin_finishing(&capture, captured_through, recording_voice));
+                continue;
+            }
+            if start_pending {
+                start_pending = false;
+                pending_voice = false;
+                if let Some(suppressor) = &audio_suppressor {
+                    suppressor.restore();
+                }
+                input.close();
+                audio_ready = false;
+                continue;
+            }
+            let voice = matches!(request, crate::home_capture::HomeRequest::TalkToAi);
+            ai_cancel.store(false, Ordering::Release);
+            crate::output_instructions::clear_inflight_cancel();
+            if !audio_ready && release_while_idle {
+                start_pending = true;
+                pending_voice = voice;
+                input.request_open();
+                if let Some(suppressor) = &audio_suppressor {
+                    suppressor.suppress();
+                }
+                events.dictation(DictationPhase::Started, "")?;
+                emit_state(&mut events, VoiceState::Dictating, &device_label)?;
+                continue;
+            }
+            if !audio_ready {
+                continue;
+            }
+            capture.start_at(captured_through);
+            recording = true;
+            recording_voice = voice;
+            recording_feedback_started = !voice && toggle_mode;
+            start_tone_played = !voice;
+            if !voice {
+                crate::feedback::play_provisional_start();
+            }
+            if let Some(suppressor) = &audio_suppressor {
+                suppressor.suppress();
+            }
+            if let Some(indicator) = &indicator {
+                indicator.send(if voice {
+                    crate::windows_indicator::WindowsIndicatorEvent::EditingStarted
+                } else {
+                    crate::windows_indicator::WindowsIndicatorEvent::Started
+                });
+            }
+            events.dictation(DictationPhase::Started, "")?;
+            emit_state(&mut events, VoiceState::Dictating, &device_label)?;
+        }
+        crate::home_capture::set_active((recording || start_pending).then_some(
+            if recording_voice || pending_voice {
+                crate::home_capture::HomeRequest::TalkToAi
+            } else {
+                crate::home_capture::HomeRequest::Talk
+            },
+        ));
         while finishing.is_none()
             && let Ok(event) = hotkey.events.try_recv()
         {
@@ -336,6 +403,7 @@ pub fn run_with_transcriber(
             match event.action {
                 HotkeyAction::Start if !recording && audio_ready => {
                     ai_cancel.store(false, Ordering::Release);
+                    crate::output_instructions::clear_inflight_cancel();
                     capture.start_at(occurred_at);
                     recording = true;
                     recording_voice = false;
@@ -372,6 +440,7 @@ pub fn run_with_transcriber(
                 }
                 HotkeyAction::VoiceStart if !recording && audio_ready => {
                     ai_cancel.store(false, Ordering::Release);
+                    crate::output_instructions::clear_inflight_cancel();
                     capture.start_at(occurred_at);
                     recording = true;
                     recording_voice = true;
@@ -414,6 +483,7 @@ pub fn run_with_transcriber(
                         HotkeyAction::Cancel | HotkeyAction::VoiceCancel
                     ) {
                         ai_cancel.store(true, Ordering::Release);
+                        crate::output_instructions::cancel_inflight();
                     }
                     pending_voice = false;
                     // Released before the opening microphone produced audio:
@@ -475,6 +545,7 @@ pub fn run_with_transcriber(
                 }
                 HotkeyAction::VoiceCancel if recording && recording_voice => {
                     ai_cancel.store(true, Ordering::Release);
+                    crate::output_instructions::cancel_inflight();
                     if let Some(suppressor) = &audio_suppressor {
                         suppressor.restore();
                     }
@@ -524,6 +595,7 @@ pub fn run_with_transcriber(
                 }
                 HotkeyAction::Cancel if recording && !recording_voice => {
                     ai_cancel.store(true, Ordering::Release);
+                    crate::output_instructions::cancel_inflight();
                     if let Some(suppressor) = &audio_suppressor {
                         suppressor.restore();
                     }
@@ -554,6 +626,7 @@ pub fn run_with_transcriber(
                 }
                 HotkeyAction::Cancel | HotkeyAction::VoiceCancel => {
                     ai_cancel.store(true, Ordering::Release);
+                    crate::output_instructions::cancel_inflight();
                 }
                 HotkeyAction::PasteLast if !recording => {
                     let queued = pending;
@@ -662,6 +735,7 @@ pub fn run_with_transcriber(
                 }
                 capture.ingest_with_pending(&samples, captured_through, None);
                 if recording {
+                    crate::home_capture::publish_level(&samples);
                     if let Some(indicator) = &indicator {
                         indicator.meter(&samples);
                     }

@@ -385,6 +385,21 @@ impl AppWindow {
         self.platform.shown = host_view(&host);
     }
 
+    /// A home card starts or finishes a capture in this process.
+    pub(super) fn platform_toggle_capture(&mut self, voice_action: bool) {
+        if self.preview {
+            return;
+        }
+        if !self.listener_running() {
+            self.set_listening(true);
+        }
+        crate::home_capture::request(if voice_action {
+            crate::home_capture::HomeRequest::TalkToAi
+        } else {
+            crate::home_capture::HomeRequest::Talk
+        });
+    }
+
     pub(super) fn platform_software_update(&self) -> Option<SoftwareUpdate> {
         Some(match self.platform.host.borrow().update_state() {
             UpdateCheck::Checking => SoftwareUpdate::Checking,

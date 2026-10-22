@@ -717,6 +717,34 @@ impl DictationHotkey {
         matches!(self.state, State::Recording { .. } | State::Locked)
     }
 
+    /// A home-card click starts a locked capture. Escape or the shortcut still ends it.
+    pub fn arm_click(&mut self) -> Option<HotkeyAction> {
+        if self.is_recording() {
+            return None;
+        }
+        self.state = State::Locked;
+        Some(HotkeyAction::Start)
+    }
+
+    /// The next click finishes a capture that [`Self::arm_click`] locked.
+    pub fn release_click(&mut self) -> Option<HotkeyAction> {
+        if !matches!(self.state, State::Locked) {
+            return None;
+        }
+        self.finish_from_home()
+    }
+
+    /// A home-card click ends whatever capture this machine is in.
+    pub fn finish_from_home(&mut self) -> Option<HotkeyAction> {
+        if !self.is_recording() {
+            return None;
+        }
+        self.state = State::Idle {
+            last_release_at: None,
+        };
+        Some(HotkeyAction::Finish)
+    }
+
     pub fn suppresses_recognition(&self) -> bool {
         !matches!(self.state, State::Idle { .. })
     }

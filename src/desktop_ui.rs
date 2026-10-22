@@ -4,16 +4,13 @@
 
 use std::time::Duration;
 
-use gpui::{
-    Animation, AnimationExt, AnyElement, App, Div, ElementId, FontWeight, IntoElement, Pixels,
-    Rgba, ShapedLine, SharedString, Stateful, Window, canvas, div, ease_in_out, prelude::*, px,
-    rgb,
-};
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-use gpui::{Image, ImageFormat, img};
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::sync::Arc;
+
+use gpui::{
+    Animation, AnimationExt, AnyElement, App, Div, ElementId, FontWeight, Image, ImageFormat,
+    IntoElement, Pixels, Rgba, ShapedLine, SharedString, Stateful, Window, canvas, div,
+    ease_in_out, img, linear_color_stop, linear_gradient, prelude::*, px, rgb,
+};
 
 use crate::design_tokens::*;
 
@@ -999,9 +996,42 @@ pub(crate) enum OrbMood {
     Thinking,
 }
 
-/// The home voice mark: a terracotta disc on a soft glow. GPUI has no radial
-/// gradient, so the glow is a low-opacity circle.
-pub(crate) fn voice_orb(mood: OrbMood) -> AnyElement {
+const HOME_MIC_SVG: &str = include_str!("../assets/icons/mic.svg");
+const HOME_SPARKLE_SVG: &str = include_str!("../assets/icons/sparkle.svg");
+
+/// An inlined SVG tinted to `color`. Assets are compiled in, so the running
+/// app does not need a file beside the binary.
+pub(crate) fn vector_icon(svg: &'static str, size: f32, color: u32) -> AnyElement {
+    let colored = svg.replace("currentColor", &format!("#{:06x}", color & 0x00ff_ffff));
+    let image = Image::from_bytes(ImageFormat::Svg, colored.into_bytes());
+    img(Arc::new(image)).size(px(size)).into_any_element()
+}
+
+pub(crate) fn home_mic_icon(color: u32) -> AnyElement {
+    vector_icon(HOME_MIC_SVG, 20.0, color)
+}
+
+pub(crate) fn home_sparkle_icon(color: u32) -> AnyElement {
+    vector_icon(HOME_SPARKLE_SVG, 20.0, color)
+}
+
+fn orb_halo(diameter: f32, alpha: u32) -> Div {
+    div()
+        .size(px(diameter))
+        .rounded_full()
+        .bg(gpui::rgba((paint(ACCENT) << 8) | alpha))
+}
+
+/// The home voice mark. GPUI cannot draw a radial gradient, so the disc is a
+/// linear terracotta-to-warm fade over stepped circles. `level` is the live
+/// microphone root-mean-square, from 0 to 1. Reduced motion keeps the disc
+/// still and only lets a loud microphone make it larger.
+pub(crate) fn voice_orb(mood: OrbMood, level: f32) -> AnyElement {
+    let level = level.clamp(0.0, 1.0);
+    let loud = match mood {
+        OrbMood::Listening => 1.0 + (0.16 * level.max(0.12)),
+        OrbMood::Thinking | OrbMood::Idle => 1.0,
+    };
     let orb = div()
         .relative()
         .size(px(ORB_GLOW))
@@ -1012,14 +1042,38 @@ pub(crate) fn voice_orb(mood: OrbMood) -> AnyElement {
             div()
                 .absolute()
                 .size(px(ORB_GLOW))
-                .rounded_full()
-                .bg(gpui::rgba((paint(ACCENT) << 8) | 0x28)),
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(orb_halo(ORB_GLOW, 0x14)),
         )
         .child(
             div()
-                .size(px(ORB_SIZE))
+                .absolute()
+                .size(px(ORB_GLOW))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(orb_halo(ORB_SIZE * 2.1, 0x22)),
+        )
+        .child(
+            div()
+                .absolute()
+                .size(px(ORB_GLOW))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(orb_halo(ORB_SIZE * 1.4, 0x38)),
+        )
+        .child(
+            div()
+                .size(px(ORB_SIZE * loud))
                 .rounded_full()
-                .bg(rgb(paint(ACCENT)))
+                .bg(linear_gradient(
+                    160.0,
+                    linear_color_stop(rgb(paint(ACCENT)), 0.0),
+                    linear_color_stop(rgb(paint(ORB_WARM)), 1.0),
+                ))
                 .shadow_lg(),
         );
     if crate::motion::reduced_motion() {
@@ -1040,9 +1094,9 @@ pub(crate) fn voice_orb(mood: OrbMood) -> AnyElement {
                 (1.0 - phase) * 2.0
             };
             let opacity = match mood {
-                OrbMood::Idle => 0.78 + (0.22 * wave),
-                OrbMood::Listening => 0.6 + (0.4 * wave),
-                OrbMood::Thinking => 0.42 + (0.58 * wave),
+                OrbMood::Idle => 0.82 + (0.18 * wave),
+                OrbMood::Listening => 0.72 + (0.28 * wave),
+                OrbMood::Thinking => 0.45 + (0.55 * wave),
             };
             orb.opacity(opacity)
         },
@@ -1051,12 +1105,16 @@ pub(crate) fn voice_orb(mood: OrbMood) -> AnyElement {
 }
 
 /// One of the two home actions. `filled` is the terracotta Talk card.
-pub(crate) fn action_card(filled: bool, recording: bool) -> Div {
+/// `emphasis` moves from 0 to 1 over the snap spring while that card is live.
+pub(crate) fn action_card(filled: bool, emphasis: f32) -> Div {
+    let emphasis = emphasis.clamp(0.0, 1.0);
     let hairline = gpui::rgba((paint(TEXT_PRIMARY) << 8) | 0x1a);
-    let border = if recording {
-        rgb(paint(if filled { ON_ACCENT } else { ACCENT }))
+    let hot = rgb(paint(if filled { ON_ACCENT } else { ACCENT }));
+    let border = mix_color(hairline, hot, emphasis);
+    let fill = if filled {
+        rgb(paint(ACCENT))
     } else {
-        hairline
+        mix_color(rgb(paint(SURFACE)), rgb(paint(ACCENT_SURFACE)), emphasis)
     };
     let card = div()
         .flex_1()
@@ -1068,14 +1126,20 @@ pub(crate) fn action_card(filled: bool, recording: bool) -> Div {
         .rounded(RADIUS_CARD)
         .border_1()
         .border_color(border)
+        .bg(fill)
         .shadow_lg()
-        .cursor_pointer();
+        .cursor_pointer()
+        .hover(|card| {
+            card.bg(if filled {
+                mix_color(rgb(paint(ACCENT)), rgb(paint(ORB_WARM)), 0.18)
+            } else {
+                rgb(paint(SURFACE_HOVER))
+            })
+        });
     if filled {
-        card.bg(rgb(paint(ACCENT)))
-            .text_color(rgb(paint(ON_ACCENT)))
+        card.text_color(rgb(paint(ON_ACCENT)))
     } else {
-        card.bg(rgb(paint(if recording { ACCENT_SURFACE } else { SURFACE })))
-            .text_color(rgb(paint(TEXT_PRIMARY)))
+        card.text_color(rgb(paint(TEXT_PRIMARY)))
     }
 }
 

@@ -577,7 +577,9 @@ fn run_processor_worker(
                 job.context.selected_text.clone(),
                 current_focus(),
                 Arc::new(current_focus),
-                Arc::new(move || control.is_cancelled()),
+                Arc::new(move || {
+                    control.is_cancelled() || crate::output_instructions::inflight_cancelled()
+                }),
                 move |text| {
                     let _ = sender.send(OutputJob::InstructionPaste { text });
                 },

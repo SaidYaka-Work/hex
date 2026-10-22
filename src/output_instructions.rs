@@ -24,6 +24,7 @@ const MAX_CHARS: usize = 500;
 const SOURCE_CAP: usize = 4_000;
 
 static REVISION: AtomicU64 = AtomicU64::new(0);
+static INFLIGHT_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
 static PERSIST_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 static WORKER: OnceLock<Sender<AiJob>> = OnceLock::new();
@@ -54,6 +55,10 @@ pub enum InstructionEvent {
     WaitingForModel,
     RequestFailed,
     NoTextYet,
+    /// The person has not yet agreed to send text to the AI service.
+    CloudNotice,
+    /// The focused window could not be confirmed, so the text is on the clipboard.
+    Copied,
 }
 
 impl InstructionEvent {
@@ -72,6 +77,10 @@ impl InstructionEvent {
                 "Heard that. AI is unavailable right now, so the text stays as dictated."
             }
             Self::NoTextYet => "Heard that. There is no text to change yet.",
+            Self::CloudNotice => {
+                "Talk to AI sends what you say, and any selected text, to our AI service."
+            }
+            Self::Copied => "Copied to the clipboard. Said.ai could not see the focused window.",
         }
     }
 }
@@ -88,6 +97,8 @@ struct PersistentFile {
     instructions: Vec<String>,
     #[serde(default)]
     selection_notice_shown: bool,
+    #[serde(default)]
+    cloud_notice_acknowledged: bool,
 }
 
 struct Store {
@@ -98,6 +109,7 @@ struct Store {
     loaded: bool,
     selection_notice_shown: bool,
     selection_notice_pending: bool,
+    cloud_notice_acknowledged: bool,
 }
 
 impl Store {
@@ -110,15 +122,16 @@ impl Store {
             loaded: false,
             selection_notice_shown: false,
             selection_notice_pending: false,
+            cloud_notice_acknowledged: false,
         }
     }
 }
 
 /// Focus observed around a Talk to AI call.
 ///
-/// `Unreadable` is Wayland, or a platform read that failed. It does not block
-/// a paste. A confirmed app at the start, then a different app or no app,
-/// does.
+/// `Unreadable` is Wayland, or a platform read that failed. An uncertain
+/// window does not receive a keystroke. A confirmed app at the start, then a
+/// different app or no app, drops the paste.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FocusRead {
     /// Wayland, or a focus read that failed. Windows always reports `None` or `App`.
@@ -128,14 +141,22 @@ pub enum FocusRead {
     App(String),
 }
 
-pub fn focus_allows_paste(start: &FocusRead, now: &FocusRead) -> bool {
-    let FocusRead::App(start) = start else {
-        return true;
-    };
-    match now {
-        FocusRead::Unreadable => true,
-        FocusRead::None => false,
-        FocusRead::App(now) => now == start,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteDelivery {
+    /// The focused app is the same one the request started in.
+    Paste,
+    /// Focus could not be confirmed. Copy, and do not synthesize a keystroke.
+    Clipboard,
+    /// Focus moved to a different app.
+    Skip,
+}
+
+pub fn paste_delivery(start: &FocusRead, now: &FocusRead) -> PasteDelivery {
+    match (start, now) {
+        (FocusRead::App(start), FocusRead::App(now)) if start == now => PasteDelivery::Paste,
+        (FocusRead::App(_), FocusRead::App(_)) => PasteDelivery::Skip,
+        (FocusRead::App(_), FocusRead::None) => PasteDelivery::Skip,
+        _ => PasteDelivery::Clipboard,
     }
 }
 
@@ -295,7 +316,7 @@ fn worker_sender() -> Sender<AiJob> {
                 .name("said-ai".into())
                 .spawn(move || {
                     while let Ok(job) = receiver.recv() {
-                        if (job.cancelled)() {
+                        if (job.cancelled)() || inflight_cancelled() {
                             continue;
                         }
                         let outcome = accept_with(
@@ -303,14 +324,18 @@ fn worker_sender() -> Sender<AiJob> {
                             job.selected.as_deref(),
                             job.cancelled.as_ref(),
                         );
-                        if (job.cancelled)() {
-                            continue;
-                        }
-                        if !focus_allows_paste(&job.focus, &(job.focus_now)()) {
+                        if (job.cancelled)() || inflight_cancelled() {
                             continue;
                         }
                         if let Some(text) = outcome.paste.filter(|text| !text.trim().is_empty()) {
-                            (job.paste)(text);
+                            match paste_delivery(&job.focus, &(job.focus_now)()) {
+                                PasteDelivery::Paste => (job.paste)(text),
+                                PasteDelivery::Clipboard => {
+                                    let _ = copy_result(&text);
+                                    note_copied();
+                                }
+                                PasteDelivery::Skip => {}
+                            }
                         }
                     }
                 })
@@ -324,16 +349,17 @@ const SYSTEM_PROMPT: &str = "\
 You edit dictation for a voice app. Reply with one JSON object and no other text. \
 Fields: action, instruction, append, text. \
 action is one of: session, persistent, clear_session, clear_persistent, clear_all, apply_once, rewrite, ignore. \
-session: a temporary style, such as \"for now write formally\". \
-persistent: a style to keep, such as \"always write formally\". Set append true so other saved preferences stay. \
-also sets append true. \
-apply_once: edit Source once, such as \"translate this to Spanish\". Do not store it. \
-rewrite: ordinary speech. Rewrite the utterance with the active instructions into text. \
-clear_session, clear_persistent, and clear_all forget instructions. \
+session: a temporary style, such as \"for now write formally\". Leave text empty. \
+persistent: a style to keep, such as \"always write formally\". Set append true so other saved preferences stay. Leave text empty. \
+also sets append true and leaves text empty. \
+apply_once: edit Source once, such as \"translate this to Spanish\". Do not store it. If Source is (none), leave text empty. \
+rewrite: ordinary speech that is not an instruction. Rewrite the utterance with the active instructions into text. \
+clear_session, clear_persistent, and clear_all forget instructions and leave text empty. \
 ignore: nothing to paste. \
 instruction is the style, or empty. \
-text is the paste-ready rewrite of Source when Source is present, or of the utterance when action is rewrite. \
-Leave text empty when nothing should be pasted. Never put the instruction itself in text.";
+text is the paste-ready rewrite of Source when Source is present and action is apply_once, or of the utterance when action is rewrite. \
+Leave text empty for session, persistent, and clear actions. Never put the instruction itself in text. \
+Source is only text the person selected. It is never an earlier dictation.";
 
 fn accept_with(
     transcript: &str,
@@ -347,32 +373,22 @@ fn accept_with(
     if spoken.is_empty() {
         return remember(InstructionEvent::NoTextYet, None);
     }
-    let selected_text = selected
+    if !cloud_notice_acknowledged() {
+        return remember(InstructionEvent::CloudNotice, None);
+    }
+    let source = selected
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(clip_source);
-    let source = selected_text.clone().or_else(|| {
-        with_store(|state| state.last_dictation.clone()).map(|text| clip_source(&text))
-    });
     let instructions = with_store(|state| standing(state));
     let user = user_prompt(&instructions, source.as_deref(), spoken);
     let decision = match llm_backend::complete(SYSTEM_PROMPT, &user, cancelled) {
-        Ok(turn) => {
-            if selected_text.is_some() {
-                mark_selection_notice();
-            }
-            decision_from_turn(turn, spoken, source.is_some())
-        }
+        Ok(turn) => decision_from_turn(turn, spoken, source.is_some()),
         Err(ModelError::Cancelled) => return quiet(),
         Err(ModelError::MissingKey) => {
             decision_from_fallback(spoken, InstructionEvent::WaitingForModel)
         }
-        Err(ModelError::Failed) => {
-            if selected_text.is_some() {
-                mark_selection_notice();
-            }
-            decision_from_fallback(spoken, InstructionEvent::RequestFailed)
-        }
+        Err(ModelError::Failed) => decision_from_fallback(spoken, InstructionEvent::RequestFailed),
     };
     if cancelled() {
         return quiet();
@@ -414,7 +430,9 @@ fn decision_from_turn(turn: ModelTurn, spoken: &str, has_source: bool) -> Decisi
                 text: filled(turn.instruction, spoken),
                 append: turn.append,
             }),
-            paste: has_source.then_some(paste_text).flatten(),
+            // An instruction updates the chip and pastes nothing, even when
+            // the model also returned a rewrite of earlier speech.
+            paste: None,
             event: InstructionEvent::SessionUpdated,
         },
         ModelAction::Persistent => Decision {
@@ -424,23 +442,31 @@ fn decision_from_turn(turn: ModelTurn, spoken: &str, has_source: bool) -> Decisi
                 // A persistent phrase adds. It does not wipe other saved preferences.
                 append: true,
             }),
-            paste: has_source.then_some(paste_text).flatten(),
+            paste: None,
             event: InstructionEvent::PersistentUpdated,
         },
         ModelAction::ClearSession => Decision::clear(InstructionEvent::ClearedSession),
         ModelAction::ClearPersistent => Decision::clear(InstructionEvent::ClearedPersistent),
         ModelAction::ClearAll => Decision::clear(InstructionEvent::ClearedAll),
         ModelAction::ApplyOnce => {
-            let applied = paste_text.is_some();
+            let paste = (!instruction_only(spoken) && has_source)
+                .then_some(paste_text)
+                .flatten();
+            let applied = paste.is_some();
             Decision {
                 store: None,
-                paste: paste_text,
+                paste,
                 event: if applied {
                     InstructionEvent::Applied
+                } else if instruction_only(spoken) {
+                    InstructionEvent::SessionUpdated
                 } else {
                     InstructionEvent::NoTextYet
                 },
             }
+        }
+        ModelAction::Rewrite if instruction_only(spoken) => {
+            style_decision(spoken, filled(turn.instruction, spoken))
         }
         ModelAction::Rewrite => {
             let failed = paste_text.is_none();
@@ -458,6 +484,35 @@ fn decision_from_turn(turn: ModelTurn, spoken: &str, has_source: bool) -> Decisi
             store: None,
             paste: None,
             event: InstructionEvent::NoTextYet,
+        },
+    }
+}
+
+fn instruction_only(spoken: &str) -> bool {
+    let normalized = normalize(spoken);
+    if clear_command(&normalized).is_some() || is_one_shot(&normalized) {
+        return false;
+    }
+    wants_persistent(&normalized)
+        || wants_session(&normalized)
+        || wants_append(&normalized)
+        || contains_phrase(&normalized, "sound")
+}
+
+fn style_decision(spoken: &str, text: String) -> Decision {
+    let normalized = normalize(spoken);
+    let persistent = wants_persistent(&normalized) && !wants_session(&normalized);
+    Decision {
+        store: Some(StoreOp {
+            persistent,
+            text,
+            append: persistent || wants_append(&normalized),
+        }),
+        paste: None,
+        event: if persistent {
+            InstructionEvent::PersistentUpdated
+        } else {
+            InstructionEvent::SessionUpdated
         },
     }
 }
@@ -509,16 +564,64 @@ fn filled(text: String, spoken: &str) -> String {
     }
 }
 
-fn mark_selection_notice() {
+fn cloud_notice_acknowledged() -> bool {
+    with_store(|state| state.cloud_notice_acknowledged)
+}
+
+/// `true` until the person continues past the cloud notice.
+pub fn cloud_notice_outstanding() -> bool {
+    !cloud_notice_acknowledged()
+}
+
+pub fn acknowledge_cloud_notice() {
     with_store(|state| {
-        if state.selection_notice_shown {
+        if state.cloud_notice_acknowledged {
             return;
         }
-        state.selection_notice_shown = true;
-        state.selection_notice_pending = true;
+        state.cloud_notice_acknowledged = true;
+        state.event = None;
         save_state(state);
         bump();
     });
+}
+
+pub fn cancel_inflight() {
+    INFLIGHT_CANCEL.store(true, Ordering::Release);
+}
+
+pub fn clear_inflight_cancel() {
+    INFLIGHT_CANCEL.store(false, Ordering::Release);
+}
+
+pub fn inflight_cancelled() -> bool {
+    INFLIGHT_CANCEL.load(Ordering::Acquire)
+}
+
+fn note_copied() {
+    with_store(|state| {
+        state.event = Some(InstructionEvent::Copied);
+        bump();
+    });
+}
+
+fn copy_result(text: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_paste::LinuxPaster::copy_without_paste(text)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::windows_paste::WindowsPaster::copy_without_paste(text)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::paste::copy_without_paste(text)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        let _ = text;
+        false
+    }
 }
 
 fn clip_source(text: &str) -> String {
@@ -634,6 +737,7 @@ fn ensure_loaded(state: &mut Store) {
     state.loaded = true;
     let file = load_file();
     state.selection_notice_shown = file.selection_notice_shown;
+    state.cloud_notice_acknowledged = file.cloud_notice_acknowledged;
     state.persistent = file
         .instructions
         .into_iter()
@@ -674,6 +778,7 @@ fn save_state(state: &Store) {
     let file = PersistentFile {
         instructions: state.persistent.clone(),
         selection_notice_shown: state.selection_notice_shown,
+        cloud_notice_acknowledged: state.cloud_notice_acknowledged,
     };
     let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
         return;
@@ -882,7 +987,13 @@ fn isolated_inner(test: impl FnOnce()) {
     ));
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).unwrap();
-    LOCAL_PATH.with(|cell| *cell.borrow_mut() = Some(directory.join("output-instructions.json")));
+    let path = directory.join("output-instructions.json");
+    fs::write(
+        &path,
+        br#"{"instructions":[],"cloud_notice_acknowledged":true}"#,
+    )
+    .unwrap();
+    LOCAL_PATH.with(|cell| *cell.borrow_mut() = Some(path));
     LOCAL_STORE.with(|cell| *cell.borrow_mut() = Some(Store::new()));
     test();
     LOCAL_STORE.with(|cell| *cell.borrow_mut() = None);
@@ -1072,8 +1183,8 @@ mod tests {
             || {
                 accept("for now let's write formally", None);
                 accept("always write formally", None);
-                finish_talk("good morning");
-                let outcome = accept("translate this to Spanish", None);
+                finish_talk("kept on this computer");
+                let outcome = accept("translate this to Spanish", Some("good morning"));
                 assert_eq!(outcome.paste.as_deref(), Some("Buenos días."));
                 assert_eq!(outcome.event, InstructionEvent::Applied);
                 assert_eq!(active().len(), 2);
@@ -1190,13 +1301,7 @@ mod tests {
                 let long = "word ".repeat(2_000);
                 let outcome = accept("make this shorter", Some(&long));
                 assert_eq!(outcome.paste.as_deref(), Some("short"));
-                assert_eq!(
-                    take_selection_notice(),
-                    Some("Selected text is sent to our AI service.")
-                );
-                assert!(take_selection_notice().is_none());
                 accept("make this shorter", Some("again"));
-                assert!(take_selection_notice().is_none());
             },
         );
     }
@@ -1213,26 +1318,98 @@ mod tests {
     }
 
     #[test]
-    fn focus_change_blocks_paste_and_wayland_does_not() {
-        assert!(focus_allows_paste(
-            &FocusRead::Unreadable,
-            &FocusRead::App("other".into())
-        ));
-        assert!(focus_allows_paste(
-            &FocusRead::App("notes".into()),
-            &FocusRead::App("notes".into())
-        ));
-        assert!(!focus_allows_paste(
-            &FocusRead::App("notes".into()),
-            &FocusRead::App("browser".into())
-        ));
-        assert!(!focus_allows_paste(
-            &FocusRead::App("notes".into()),
-            &FocusRead::None
-        ));
-        assert!(focus_allows_paste(
-            &FocusRead::App("notes".into()),
-            &FocusRead::Unreadable
-        ));
+    fn focus_change_skips_and_an_uncertain_window_uses_the_clipboard() {
+        assert_eq!(
+            paste_delivery(&FocusRead::Unreadable, &FocusRead::App("other".into())),
+            PasteDelivery::Clipboard
+        );
+        assert_eq!(
+            paste_delivery(&FocusRead::None, &FocusRead::None),
+            PasteDelivery::Clipboard
+        );
+        assert_eq!(
+            paste_delivery(
+                &FocusRead::App("notes".into()),
+                &FocusRead::App("notes".into())
+            ),
+            PasteDelivery::Paste
+        );
+        assert_eq!(
+            paste_delivery(
+                &FocusRead::App("notes".into()),
+                &FocusRead::App("browser".into())
+            ),
+            PasteDelivery::Skip
+        );
+        assert_eq!(
+            paste_delivery(&FocusRead::App("notes".into()), &FocusRead::None),
+            PasteDelivery::Skip
+        );
+        assert_eq!(
+            paste_delivery(&FocusRead::App("notes".into()), &FocusRead::Unreadable),
+            PasteDelivery::Clipboard
+        );
+    }
+
+    #[test]
+    fn an_instruction_does_not_send_or_paste_the_last_talk() {
+        isolated_with(
+            crate::llm_backend::begin_mock("test-key", |request| {
+                let source = request
+                    .prompt
+                    .split_once("Source:\n")
+                    .and_then(|(_, rest)| rest.split_once("\n\nUtterance:\n"))
+                    .map(|(source, _)| source)
+                    .unwrap_or("");
+                assert_eq!(source, "(none)");
+                assert!(!request.prompt.contains("hello there"));
+                let content = serde_json::json!({
+                    "action": "session",
+                    "instruction": "write formally",
+                    "append": false,
+                    "text": "hello there, formally",
+                })
+                .to_string();
+                Ok(crate::llm_backend::MockReply {
+                    status: 200,
+                    body: crate::llm_backend::chat_json(&content),
+                })
+            }),
+            || {
+                finish_talk("hello there");
+                let outcome = accept("for now write formally", None);
+                assert!(outcome.paste.is_none());
+                assert_eq!(outcome.event, InstructionEvent::SessionUpdated);
+                assert_eq!(active()[0].text, "write formally");
+            },
+        );
+    }
+
+    #[test]
+    fn the_cloud_notice_blocks_the_first_send() {
+        isolated_with(
+            crate::llm_backend::begin_mock("test-key", |_| {
+                Ok(crate::llm_backend::MockReply {
+                    status: 200,
+                    body: crate::llm_backend::chat_json(
+                        r#"{"action":"rewrite","instruction":"","append":false,"text":"sent"}"#,
+                    ),
+                })
+            }),
+            || {
+                with_store(|state| {
+                    state.cloud_notice_acknowledged = false;
+                    save_state(state);
+                });
+                let blocked = accept("hello team", None);
+                assert!(blocked.paste.is_none());
+                assert_eq!(blocked.event, InstructionEvent::CloudNotice);
+                assert!(crate::llm_backend::captured_requests().is_empty());
+                acknowledge_cloud_notice();
+                assert!(!cloud_notice_outstanding());
+                let outcome = accept("hello team", None);
+                assert_eq!(outcome.paste.as_deref(), Some("sent"));
+            },
+        );
     }
 }

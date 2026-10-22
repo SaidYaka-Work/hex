@@ -55,6 +55,10 @@ pub(crate) enum DesktopAction {
     SetDictationShortcut(DesktopShortcut),
     StartListening,
     StopListening,
+    /// A home card asked the listener to start or finish a capture.
+    ToggleCapture {
+        voice_action: bool,
+    },
 }
 
 #[cfg(test)]

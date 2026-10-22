@@ -9,16 +9,26 @@
 //!
 //! Resolution order, outside tests:
 //! 1. Baked [`LLM_SLOT`].
-//! 2. When `SAID_AI_CONFIG_URL` is set, a small JSON document fetched once
-//!    and cached as `ai-slot.json`. A failed fetch uses the cache, then the
-//!    baked slot.
-//! 3. `SAID_AI_BASE_URL`, `SAID_AI_MODEL`, and `SAID_AI_KEY_VARIABLE`
-//!    override that result.
+//! 2. When `SAID_AI_CONFIG_URL` is an https URL, a small JSON document is
+//!    fetched once on a background thread and cached as `ai-slot.json`.
+//!    Remote config can change `base_url` and `model` only. It cannot change
+//!    which environment variable holds the key. The host must be on
+//!    [`ALLOWED_HOSTS`], and the document must carry an ed25519 signature
+//!    under [`SLOT_PUBLIC_KEY`]. An unsigned, invalid, or off-list document
+//!    is ignored. The cache is checked with the same rules.
+//! 3. `SAID_AI_BASE_URL` and `SAID_AI_MODEL` override that result. The base
+//!    URL still has to be an allowlisted host. `SAID_AI_KEY_VARIABLE` is a
+//!    local override of the key's variable name and is never taken from the
+//!    network.
 //!
-//! The key itself stays behind [`api_key`]: an environment variable named by
-//! the slot. A small proxy in front of this client would keep both the key
-//! and the model id out of the binary. Tests never read a real key and never
-//! hit the network.
+//! The key itself stays behind [`api_key`]. Reading it does not load remote
+//! config, so the home can ask whether a key is present without blocking.
+//! A small proxy at [`SAID_PROXY_HOST`] would keep both the key and the model
+//! id out of the binary. That proxy is not running yet; the host is only an
+//! allowlist placeholder. The private key that matches [`SLOT_PUBLIC_KEY`] is
+//! not in this repo, so a remote document stays ignored until the owner
+//! replaces the public key and signs the config. Tests never read a real key
+//! and never hit the network.
 
 use std::io::{Read, Write};
 #[cfg(not(target_os = "windows"))]
@@ -33,7 +43,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[cfg(not(test))]
+use base64::Engine;
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 
 /// Baked Talk to AI slot. Strings only; see the module docs for overrides.
@@ -51,12 +62,31 @@ pub const LLM_SLOT: LlmSlot = LlmSlot {
     key_variable: "GEMINI_API_KEY",
 };
 
+/// Future owner-controlled proxy. Remote config may name this host. Nothing
+/// is deployed here yet; a proxy would hold the key and the model id.
+pub const SAID_PROXY_HOST: &str = "ai.saidyaka.com";
+
+/// Hosts a slot base URL may use. Matched exactly, with no port and no userinfo.
+const ALLOWED_HOSTS: &[&str] = &[
+    "generativelanguage.googleapis.com",
+    "openrouter.ai",
+    SAID_PROXY_HOST,
+];
+
+/// Ed25519 public key for remote slot documents. The matching private key is
+/// not in the repository. Unsigned or invalid documents are ignored.
+const SLOT_PUBLIC_KEY: [u8; 32] = [
+    0xee, 0x8d, 0xf2, 0x24, 0xe7, 0x5a, 0xe0, 0xb4, 0x34, 0xc8, 0x29, 0x5a, 0x8f, 0x44, 0x4f, 0xa8,
+    0xf9, 0x21, 0x96, 0xc6, 0x16, 0xa5, 0x29, 0x16, 0x60, 0x57, 0x53, 0x18, 0xee, 0x3c, 0x7c, 0x25,
+];
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(not(test))]
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const TEMPERATURE: f32 = 0.2;
-const MAX_TOKENS: u32 = 800;
+const MIN_OUTPUT_TOKENS: u32 = 1500;
+const MAX_OUTPUT_TOKENS: u32 = 8192;
 
 static THINKING: AtomicBool = AtomicBool::new(false);
 
@@ -92,15 +122,17 @@ pub enum ModelError {
 struct ResolvedSlot {
     base_url: String,
     model: String,
-    key_variable: String,
 }
 
-#[cfg(not(test))]
 #[derive(Clone, Debug, Deserialize)]
 struct SlotFile {
     base_url: String,
     model: String,
-    key_variable: String,
+    /// Present on older caches. Remote config must not choose the key variable.
+    #[serde(default)]
+    key_variable: Option<String>,
+    #[serde(default)]
+    signature: String,
 }
 
 /// `true` while a Talk to AI request is in flight in this process.
@@ -132,7 +164,9 @@ pub fn warm_slot() {
     }
 }
 
-/// `true` when the slot's key variable holds a usable value.
+/// `true` when the key variable holds a usable value.
+///
+/// This reads the environment only. It does not fetch or wait for remote config.
 pub fn api_key_present() -> bool {
     api_key().is_some()
 }
@@ -153,9 +187,16 @@ pub fn complete(
     if cancelled() {
         return Err(ModelError::Cancelled);
     }
-    let prepared = prepare_request(&key, system, user);
+    let prepared = prepare_request(&key, system, user, true);
     set_thinking(true);
-    let result = dispatch(&prepared, cancelled);
+    let first = dispatch(&prepared, cancelled);
+    let result = match first {
+        Ok(response) if response.status == 400 || response.status == 422 => {
+            let plain = prepare_request(&key, system, user, false);
+            dispatch(&plain, cancelled)
+        }
+        other => other,
+    };
     set_thinking(false);
     if cancelled() {
         return Err(ModelError::Cancelled);
@@ -206,7 +247,6 @@ fn baked_slot() -> ResolvedSlot {
     ResolvedSlot {
         base_url: LLM_SLOT.base_url.to_string(),
         model: LLM_SLOT.model.to_string(),
-        key_variable: LLM_SLOT.key_variable.to_string(),
     }
 }
 
@@ -225,14 +265,13 @@ fn resolved_slot() -> ResolvedSlot {
 #[cfg(not(test))]
 fn load_slot() -> ResolvedSlot {
     let mut slot = fetch_remote_slot().unwrap_or_else(baked_slot);
-    if let Some(base_url) = env_https("SAID_AI_BASE_URL") {
+    if let Some(base_url) = env_https("SAID_AI_BASE_URL")
+        && base_url_allowed(&base_url)
+    {
         slot.base_url = base_url;
     }
     if let Some(model) = env_token("SAID_AI_MODEL") {
         slot.model = model;
-    }
-    if let Some(key_variable) = env_token("SAID_AI_KEY_VARIABLE") {
-        slot.key_variable = key_variable;
     }
     slot
 }
@@ -245,28 +284,61 @@ fn fetch_remote_slot() -> Option<ResolvedSlot> {
         return read_cached_slot();
     }
     match fetch_https(url, CONFIG_TIMEOUT) {
-        Some(body) => parse_slot_file(&body).or_else(read_cached_slot),
+        Some(body) => accept_remote_slot(&body).or_else(read_cached_slot),
         None => read_cached_slot(),
     }
 }
 
-#[cfg(not(test))]
-fn parse_slot_file(body: &str) -> Option<ResolvedSlot> {
+/// Accept a remote or cached slot document. `key_variable` is ignored.
+/// The signature covers `base_url + "\n" + model`.
+fn accept_remote_slot(body: &str) -> Option<ResolvedSlot> {
     let file: SlotFile = serde_json::from_str(body).ok()?;
-    let slot = ResolvedSlot {
-        base_url: file.base_url.trim().trim_end_matches('/').to_string(),
-        model: file.model.trim().to_string(),
-        key_variable: file.key_variable.trim().to_string(),
-    };
-    if !slot.base_url.starts_with("https://")
-        || !safe_token(&slot.base_url)
-        || !safe_token(&slot.model)
-        || !safe_token(&slot.key_variable)
-    {
+    let _ = file.key_variable;
+    let base_url = file.base_url.trim().trim_end_matches('/').to_string();
+    let model = file.model.trim().to_string();
+    if !base_url_allowed(&base_url) || !safe_token(&model) {
         return None;
     }
-    write_cached_slot(&slot);
+    if !signature_valid(&base_url, &model, file.signature.trim()) {
+        return None;
+    }
+    let slot = ResolvedSlot { base_url, model };
+    #[cfg(not(test))]
+    write_cached_slot(&slot, file.signature.trim());
     Some(slot)
+}
+
+fn base_url_allowed(url: &str) -> bool {
+    let Some(host) = https_host(url) else {
+        return false;
+    };
+    ALLOWED_HOSTS.contains(&host) && safe_token(url)
+}
+
+fn https_host(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://")?;
+    if rest.contains('@') || rest.is_empty() {
+        return None;
+    }
+    let host = rest.split(['/', '?', '#']).next()?;
+    if host.is_empty() || host.contains(':') {
+        return None;
+    }
+    Some(host)
+}
+
+fn signature_valid(base_url: &str, model: &str, signature: &str) -> bool {
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(signature) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(&bytes) else {
+        return false;
+    };
+    let Ok(key) = VerifyingKey::from_bytes(&SLOT_PUBLIC_KEY) else {
+        return false;
+    };
+    let message = format!("{base_url}\n{model}");
+    key.verify_strict(message.as_bytes(), &signature).is_ok()
 }
 
 #[cfg(not(test))]
@@ -278,17 +350,13 @@ fn cached_slot_path() -> PathBuf {
 fn read_cached_slot() -> Option<ResolvedSlot> {
     let bytes = std::fs::read(cached_slot_path()).ok()?;
     let body = String::from_utf8(bytes).ok()?;
-    let file: SlotFile = serde_json::from_str(&body).ok()?;
-    let slot = ResolvedSlot {
-        base_url: file.base_url,
-        model: file.model,
-        key_variable: file.key_variable,
-    };
-    (slot.base_url.starts_with("https://") && safe_token(&slot.model)).then_some(slot)
+    // Re-check the host and the signature. Do not trust a file that only
+    // starts with https.
+    accept_remote_slot(&body)
 }
 
 #[cfg(not(test))]
-fn write_cached_slot(slot: &ResolvedSlot) {
+fn write_cached_slot(slot: &ResolvedSlot, signature: &str) {
     let path = cached_slot_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -296,7 +364,7 @@ fn write_cached_slot(slot: &ResolvedSlot) {
     let bytes = serde_json::json!({
         "base_url": slot.base_url,
         "model": slot.model,
-        "key_variable": slot.key_variable,
+        "signature": signature,
     })
     .to_string()
     .into_bytes();
@@ -339,6 +407,14 @@ fn usable_key(raw: &str) -> Option<String> {
     safe_token(raw.trim()).then(|| raw.trim().to_string())
 }
 
+fn key_variable_name() -> String {
+    #[cfg(not(test))]
+    if let Some(name) = env_token("SAID_AI_KEY_VARIABLE") {
+        return name;
+    }
+    LLM_SLOT.key_variable.to_string()
+}
+
 fn api_key() -> Option<String> {
     #[cfg(test)]
     {
@@ -351,8 +427,7 @@ fn api_key() -> Option<String> {
     }
     #[cfg(not(test))]
     {
-        let variable = resolved_slot().key_variable;
-        std::env::var(variable)
+        std::env::var(key_variable_name())
             .ok()
             .and_then(|value| usable_key(&value))
     }
@@ -380,20 +455,30 @@ enum DispatchError {
     Failed,
 }
 
-fn prepare_request(api_key: &str, system: &str, user: &str) -> PreparedRequest {
+fn output_token_budget(system: &str, user: &str) -> u32 {
+    let chars = system.chars().count() + user.chars().count();
+    let estimated = chars.div_ceil(4) as u32;
+    estimated
+        .saturating_mul(3)
+        .clamp(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS)
+}
+
+fn prepare_request(api_key: &str, system: &str, user: &str, json_object: bool) -> PreparedRequest {
     let slot = resolved_slot();
     let url = chat_completions_url(&slot.base_url);
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": slot.model,
         "temperature": TEMPERATURE,
-        "max_tokens": MAX_TOKENS,
-        "response_format": { "type": "json_object" },
+        "max_tokens": output_token_budget(system, user),
         "messages": [
             { "role": "system", "content": system },
             { "role": "user", "content": user }
         ]
-    })
-    .to_string();
+    });
+    if json_object {
+        body["response_format"] = serde_json::json!({ "type": "json_object" });
+    }
+    let body = body.to_string();
     let config = format!(
         "url = \"{}\"\nheader = \"Content-Type: application/json\"\nheader = \"Authorization: Bearer {}\"\ndata-binary = \"{}\"\n",
         curl_quoted(&url),
@@ -782,10 +867,13 @@ pub(crate) fn begin_mock(
     key: &'static str,
     handler: fn(&CapturedRequest) -> Result<MockReply, String>,
 ) -> TestGuard {
-    *MOCK.lock().unwrap_or_else(|error| error.into_inner()) = handler;
-    TestGuard {
+    let guard = TestGuard {
         _inner: test_hook::begin(Some(key.to_string()), forward_mock),
-    }
+    };
+    // Install the handler only after the suite lock is held, so parallel
+    // tests cannot observe each other's transport.
+    *MOCK.lock().unwrap_or_else(|error| error.into_inner()) = handler;
+    guard
 }
 
 #[cfg(test)]
@@ -934,5 +1022,77 @@ mod tests {
             Err(ModelError::Cancelled)
         );
         assert!(captured_requests().is_empty());
+    }
+
+    #[test]
+    fn output_budget_scales_with_input_and_has_a_floor() {
+        assert_eq!(output_token_budget("hi", "there"), MIN_OUTPUT_TOKENS);
+        let long = "word ".repeat(8_000);
+        let budget = output_token_budget("system", &long);
+        assert!(budget > MIN_OUTPUT_TOKENS);
+        assert!(budget <= MAX_OUTPUT_TOKENS);
+    }
+
+    #[test]
+    fn remote_slot_rejects_other_hosts_and_unsigned_documents() {
+        assert!(base_url_allowed(
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        ));
+        assert!(base_url_allowed("https://openrouter.ai/api/v1"));
+        assert!(base_url_allowed(&format!("https://{SAID_PROXY_HOST}/v1")));
+        assert!(!base_url_allowed("https://evil.example/v1"));
+        assert!(!base_url_allowed(
+            "https://generativelanguage.googleapis.com.evil.example/v1"
+        ));
+        assert!(!base_url_allowed(
+            "https://user:pass@generativelanguage.googleapis.com/v1"
+        ));
+        assert!(!base_url_allowed(
+            "https://generativelanguage.googleapis.com:8443/v1"
+        ));
+        assert!(!base_url_allowed("http://openrouter.ai/api/v1"));
+        let unsigned = r#"{"base_url":"https://openrouter.ai/api/v1","model":"google/gemini-3.5-flash-lite","key_variable":"AWS_SECRET_ACCESS_KEY"}"#;
+        assert!(accept_remote_slot(unsigned).is_none());
+    }
+
+    #[test]
+    fn a_signed_allowlisted_slot_is_accepted_without_its_key_variable() {
+        let signature = "sNYztw5Q5HcyLEe4L22tM0ARBz9brDXPED0KyuhrflXlbtsL2tXaok/VNxPc4Nonm+4/3vdnTeJE68mSOAdZDQ==";
+        let body = format!(
+            r#"{{"base_url":"https://openrouter.ai/api/v1","model":"google/gemini-3.5-flash-lite","key_variable":"AWS_SECRET_ACCESS_KEY","signature":"{signature}"}}"#
+        );
+        let slot = accept_remote_slot(&body).expect("signed slot");
+        assert_eq!(slot.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(slot.model, "google/gemini-3.5-flash-lite");
+        assert_eq!(key_variable_name(), LLM_SLOT.key_variable);
+    }
+
+    #[test]
+    fn a_rejected_json_mode_is_retried_once_without_it() {
+        use std::sync::atomic::AtomicUsize;
+        static TRIES: AtomicUsize = AtomicUsize::new(0);
+        TRIES.store(0, Ordering::SeqCst);
+        let _guard = begin_mock("test-key", |_| {
+            let try_index = TRIES.fetch_add(1, Ordering::SeqCst);
+            if try_index == 0 {
+                Ok(MockReply {
+                    status: 400,
+                    body: r#"{"error":"response_format"}"#.into(),
+                })
+            } else {
+                Ok(MockReply {
+                    status: 200,
+                    body: chat_json(
+                        "note {\"action\":\"ignore\",\"instruction\":\"\",\"append\":false,\"text\":\"\"} thanks",
+                    ),
+                })
+            }
+        });
+        let turn = complete("system", "hello", &running).unwrap();
+        assert_eq!(turn.action, ModelAction::Ignore);
+        assert_eq!(TRIES.load(Ordering::SeqCst), 2);
+        let requests = captured_requests();
+        assert!(requests[0].config.contains("json_object"));
+        assert!(!requests[1].config.contains("json_object"));
     }
 }

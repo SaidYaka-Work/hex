@@ -56,6 +56,7 @@ mod gguf_session;
 mod hex_microphone;
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 mod history;
+mod home_capture;
 mod instance;
 #[cfg(target_os = "macos")]
 mod keyboard;

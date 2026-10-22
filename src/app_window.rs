@@ -30,13 +30,13 @@ use crate::desktop_ui::{
     ButtonKind, Icon, NavigationIcon, OrbMood, Tone, action_card, busy_label, button,
     danger_menu_item, detail_body, detail_header, detail_placeholder, detail_row, detail_title,
     disclosure_button, disclosure_frame, dropdown_menu_with_progress, error_message, error_panel,
-    hotkey_keycaps, icon, icon_button, inline_error, instruction_chip, list_row, list_row_meta,
-    list_row_title, listener_status, menu_item, menu_with_progress, mix_color, navigation_item,
-    pane_body, pane_content, pane_detail, pane_header, pane_header_with_action, pane_list,
-    pane_scroll_body, panel, panel_header, progress_track, section_label, settings_copy,
-    settings_row, settings_section_label, sidebar_frame, sliding_segmented_control,
-    sliding_segmented_for, sliding_segmented_item, small_button, status_dot, status_pill, tag,
-    toggle, truncated_line, voice_orb, window_frame,
+    home_mic_icon, home_sparkle_icon, hotkey_keycaps, icon, icon_button, inline_error,
+    instruction_chip, list_row, list_row_meta, list_row_title, listener_status, menu_item,
+    menu_with_progress, mix_color, navigation_item, pane_body, pane_content, pane_detail,
+    pane_header, pane_header_with_action, pane_list, pane_scroll_body, panel, panel_header,
+    progress_track, section_label, settings_copy, settings_row, settings_section_label,
+    sidebar_frame, sliding_segmented_control, sliding_segmented_for, sliding_segmented_item,
+    small_button, status_dot, status_pill, tag, toggle, truncated_line, voice_orb, window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_processor::{ModelCatalog, ModelChoice};
@@ -721,14 +721,14 @@ fn opencode_unavailable_copy(
 ) -> Option<OpenCodeUnavailableCopy> {
     match state {
         ModelCatalogState::Loading => Some(OpenCodeUnavailableCopy {
-            title: tr("Checking for OpenCode"),
+            title: tr("Checking…"),
             description: match feature {
                 OpenCodeFeature::VoiceAction => {
-                    tr("Voice Action will be available after Said.ai connects to OpenCode.")
+                    tr("Voice Action will be available after Said.ai connects.")
                 }
-                OpenCodeFeature::Transformation => tr(
-                    "OpenCode transformation will be available after Said.ai connects to OpenCode.",
-                ),
+                OpenCodeFeature::Transformation => {
+                    tr("Transformation will be available after Said.ai connects.")
+                }
             },
             error: None,
             can_retry: false,
@@ -737,15 +737,15 @@ fn opencode_unavailable_copy(
         }),
         ModelCatalogState::Missing => Some(OpenCodeUnavailableCopy {
             title: match feature {
-                OpenCodeFeature::VoiceAction => tr("Voice Action requires OpenCode"),
-                OpenCodeFeature::Transformation => tr("Transformation requires OpenCode"),
+                OpenCodeFeature::VoiceAction => tr("Voice Action is unavailable"),
+                OpenCodeFeature::Transformation => tr("Transformation is unavailable"),
             },
             description: match feature {
-                OpenCodeFeature::VoiceAction => tr(
-                    "Install and configure OpenCode to turn spoken instructions into paste-ready text.",
-                ),
+                OpenCodeFeature::VoiceAction => {
+                    tr("Turn spoken instructions into paste-ready text.")
+                }
                 OpenCodeFeature::Transformation => {
-                    tr("Install and configure OpenCode to transform dictated text.")
+                    tr("Transform dictated text after Said.ai connects.")
                 }
             },
             error: None,
@@ -754,8 +754,8 @@ fn opencode_unavailable_copy(
             can_open_setup: true,
         }),
         ModelCatalogState::Failed(error) => Some(OpenCodeUnavailableCopy {
-            title: tr("OpenCode is unavailable"),
-            description: tr("Said.ai could not load the OpenCode model catalog."),
+            title: tr("The model catalog is unavailable"),
+            description: tr("Said.ai could not load the model catalog."),
             error: Some(error.clone()),
             can_retry: true,
             retry_label: tr("Retry"),
@@ -1329,6 +1329,12 @@ impl AppWindow {
                         } else {
                             Duration::from_millis(500)
                         };
+                        let home_live = window.uses_simplified_home()
+                            && (crate::home_capture::active().is_some()
+                                || crate::llm_backend::is_thinking());
+                        if home_live {
+                            interval = Duration::from_millis(80);
+                        }
                         let model_catalog_changed = window.poll_model_catalog();
                         window.retry_model_catalog();
                         let application_catalog_changed = window.poll_application_catalog();
@@ -1359,6 +1365,7 @@ impl AppWindow {
                             || instructions_changed
                             || platform_changed
                             || hex_mic_changed
+                            || home_live
                         {
                             cx.notify();
                         }
@@ -1404,7 +1411,7 @@ impl AppWindow {
                     browser_hosts: vec!["github.com".into()],
                     replacements: vec![TextReplacement {
                         matched_phrase: "open code".into(),
-                        output: "OpenCode".into(),
+                        output: "sample".into(),
                     }],
                     transformations: vec!["smart-punctuation".into(), "normalize-links".into()],
                     ..DictationMode::default()
@@ -1412,7 +1419,7 @@ impl AppWindow {
                 mode.post_processing.enabled = !preview.collapse_mode_processing;
                 mode.post_processing.prompt =
                     "Tighten prose and preserve technical terminology.".into();
-                mode.post_processing.model = Some("anthropic/claude-sonnet-4".into());
+                mode.post_processing.model = None;
                 mode.post_processing.variant = Some("medium".into());
                 settings.dictation_processing.modes.push(mode);
             }
@@ -1444,31 +1451,17 @@ impl AppWindow {
         } else if preview_mode {
             (
                 ModelCatalogState::Loaded(ModelCatalog {
-                    models: vec![
-                        ModelChoice {
-                            key: "sample/model".into(),
-                            name: "Sample model".into(),
-                            provider: "Sample".into(),
-                            variants: vec![
-                                "minimal".into(),
-                                "low".into(),
-                                "medium".into(),
-                                "high".into(),
-                            ],
-                        },
-                        ModelChoice {
-                            key: "anthropic/claude-haiku-4-5".into(),
-                            name: "Claude Haiku 4.5".into(),
-                            provider: "Anthropic".into(),
-                            variants: Vec::new(),
-                        },
-                        ModelChoice {
-                            key: "openai/gpt-5.4-nano".into(),
-                            name: "GPT-5.4 Nano".into(),
-                            provider: "OpenAI".into(),
-                            variants: vec!["none".into(), "low".into(), "medium".into()],
-                        },
-                    ],
+                    models: vec![ModelChoice {
+                        key: "sample/model".into(),
+                        name: "Sample model".into(),
+                        provider: "Sample".into(),
+                        variants: vec![
+                            "minimal".into(),
+                            "low".into(),
+                            "medium".into(),
+                            "high".into(),
+                        ],
+                    }],
                     default_key: Some("sample/model".into()),
                     default_name: Some("Sample model".into()),
                     default_variant: Some("minimal".into()),
@@ -5304,7 +5297,7 @@ impl AppWindow {
                 &copy,
                 "retry-opencode",
                 "open-opencode-setup",
-                tr("Open OpenCode setup"),
+                tr("Open setup"),
                 cx,
             )
             .mt_4();
@@ -5313,7 +5306,7 @@ impl AppWindow {
                     .p_4()
                     .child(settings_copy(copy.title, copy.description))
                     .when_some(copy.error, |card, error| {
-                        card.child(error_panel(tr("OpenCode reported:"), error).mt_3())
+                        card.child(error_panel(tr("Reported:"), error).mt_3())
                     })
                     .when(show_actions, |card| card.child(actions))
                     .into_any_element(),
@@ -5470,11 +5463,7 @@ impl AppWindow {
                 &replacement.matched_phrase,
                 cx,
             ),
-            output: Self::processing_input(
-                tr("Replacement (e.g. OpenCode)"),
-                &replacement.output,
-                cx,
-            ),
+            output: Self::processing_input(tr("Replacement"), &replacement.output, cx),
         }
     }
 
@@ -5482,7 +5471,7 @@ impl AppWindow {
         let entity = cx.new(|cx| {
             TextInput::multiline(
                 cx,
-                tr("Names and terms Whisper should expect, e.g. OpenCode, Effect…"),
+                tr("Names and terms the speech model should expect"),
                 initial,
             )
         });
@@ -5611,7 +5600,7 @@ impl AppWindow {
                 cx,
             ),
             prompt: Self::multiline_processing_input(
-                tr("Describe how OpenCode should rewrite your dictation…"),
+                tr("Describe how dictated text should be rewritten…"),
                 &processing.prompt,
                 cx,
             ),
@@ -6016,7 +6005,7 @@ impl AppWindow {
         });
         let processing = panel()
             .child(
-                panel_header(tr("OpenCode transformation"), Some(processing_toggle)).when(
+                panel_header(tr("Transformation"), Some(processing_toggle)).when(
                     !processing_enabled && processing_unavailable.is_none(),
                     |header| header.border_b_0(),
                 ),
@@ -6758,17 +6747,15 @@ impl AppWindow {
         let query = model.read(cx).text().trim().to_lowercase();
         let presentation = model_presentation(&self.model_catalog, selected_model);
         let (catalog_status, default_label, matches, variants) = match &self.model_catalog {
-            ModelCatalogState::Loading => {
-                (tr("Loading OpenCode…").into(), None, Vec::new(), Vec::new())
-            }
+            ModelCatalogState::Loading => (tr("Loading…").into(), None, Vec::new(), Vec::new()),
             ModelCatalogState::Missing => (
-                tr("OpenCode beta required").into(),
+                tr("Assistant required").into(),
                 None,
                 Vec::new(),
                 Vec::new(),
             ),
             ModelCatalogState::Failed(error) => (
-                tr_fill("OpenCode models unavailable: {}", &error.to_string()),
+                tr_fill("Models unavailable: {}", &error.to_string()),
                 None,
                 Vec::new(),
                 Vec::new(),
@@ -6794,10 +6781,8 @@ impl AppWindow {
                             .default_name
                             .as_ref()
                             .map(|name| match &catalog.default_key {
-                                Some(key) => {
-                                    tr_fill("OpenCode default: {}", &format!("{name} ({key})"))
-                                }
-                                None => tr_fill("OpenCode default: {}", name),
+                                Some(key) => tr_fill("Default: {}", &format!("{name} ({key})")),
+                                None => tr_fill("Default: {}", name),
                             })
                     })
                     .flatten();
@@ -6818,7 +6803,7 @@ impl AppWindow {
                 .when_some(default_label.clone(), |list, label| {
                     list.child(
                         model_choice_row(
-                            tr("Use OpenCode default"),
+                            tr("Use the default"),
                             label,
                             self.model_picker_highlight == 0,
                         )
@@ -7012,7 +6997,7 @@ impl AppWindow {
             .when_some(suggestions, |field, suggestions| field.child(suggestions));
         panel()
             .child(
-                settings_row(tr("OpenCode model"), catalog_status, model_field)
+                settings_row(tr("Model"), catalog_status, model_field)
                     .when(!has_variants, |row| row.border_b_0()),
             )
             .when(has_variants, |panel| {
@@ -7075,7 +7060,7 @@ impl AppWindow {
                                 matches!(&self.model_catalog, ModelCatalogState::Missing),
                                 |field| {
                                     field.child(
-                                        button(ButtonKind::Secondary, tr("Install OpenCode"))
+                                        button(ButtonKind::Secondary, tr("Install"))
                                             .mt_2()
                                             .id("install-opencode-beta")
                                             .on_click(|_, _, _| open_opencode_beta_docs()),
@@ -7471,29 +7456,15 @@ impl AppWindow {
             .is_some_and(|listener| listener.running)
     }
 
-    /// Talk toggles the existing listener. The chord still comes from the
-    /// physical shortcut: a click does not synthesize a key press. macOS has
-    /// no listener switch, so the click only shows the chord.
+    /// Talk starts or finishes a capture. The click does not synthesize a key.
     fn activate_talk(&mut self, cx: &mut Context<Self>) {
-        self.toggle_home_listener(cx);
-        if self.listener_running() || self.platform_listener().is_none() {
-            let shortcut = hotkey_label(&self.settings.dictation_hotkey);
-            self.home_notice = tr_fill("Hold {} and speak. Release to paste.", &shortcut);
-        } else {
-            self.home_notice = tr("Said.ai is paused.").to_string();
-        }
-        cx.notify();
-    }
-
-    fn toggle_home_listener(&mut self, _cx: &mut Context<Self>) {
         if self.preview {
+            cx.notify();
             return;
         }
-        let running = self.listener_running();
-        self.set_listening(!running);
-        if !running {
-            self.ensure_parakeet();
-        }
+        self.platform_toggle_capture(false);
+        self.ensure_parakeet();
+        cx.notify();
     }
 
     fn poll_instructions(&mut self) -> bool {
@@ -7502,28 +7473,39 @@ impl AppWindow {
             return false;
         }
         self.instruction_revision = revision;
-        if crate::output_instructions::take_selection_notice().is_some() {
-            self.home_notice = tr("Selected text is sent to our AI service.").to_string();
-        } else if let Some(event) = crate::output_instructions::last_event() {
-            self.home_notice = tr(event.label()).to_string();
+        let _ = crate::output_instructions::take_selection_notice();
+        if let Some(event) = crate::output_instructions::last_event() {
+            self.home_notice = if event == crate::output_instructions::InstructionEvent::CloudNotice
+            {
+                String::new()
+            } else {
+                tr(event.label()).to_string()
+            };
         }
         true
     }
 
-    /// Talk to AI toggles the same listener. The instruction chord is shown
-    /// beside the button; speech is classified off the dictation thread.
+    /// Talk to AI starts or finishes a capture. The first send waits on the
+    /// cloud notice, which is already on screen.
     fn activate_talk_to_ai(&mut self, cx: &mut Context<Self>) {
-        self.toggle_home_listener(cx);
-        if self.listener_running() || self.platform_listener().is_none() {
-            let shortcut = hotkey_label(&self.settings.edit_hotkey);
-            self.home_notice = tr_fill("Hold {} and say how text should come out.", &shortcut);
-        } else {
-            self.home_notice = tr("Said.ai is paused.").to_string();
+        if self.preview {
+            cx.notify();
+            return;
         }
+        if crate::output_instructions::cloud_notice_outstanding() {
+            cx.notify();
+            return;
+        }
+        self.platform_toggle_capture(true);
+        self.ensure_parakeet();
         cx.notify();
     }
 
-    fn render_simplified_home(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_simplified_home(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         crate::llm_backend::warm_slot();
         let stage = home_stage();
         let notice = self.home_notice.clone();
@@ -7546,8 +7528,12 @@ impl AppWindow {
         let downloading = preparation.model == Some(parakeet) && preparation.error.is_none();
         let fraction =
             (preparation.downloaded_bytes as f32 / PARAKEET_DOWNLOAD_BYTES).clamp(0.0, 1.0);
-        let listening = stage == "listening";
+        let capture = crate::home_capture::active();
+        let listening_talk =
+            stage == "listening" || matches!(capture, Some(crate::home_capture::HomeRequest::Talk));
+        let listening_ai = matches!(capture, Some(crate::home_capture::HomeRequest::TalkToAi));
         let thinking = stage == "thinking" || crate::llm_backend::is_thinking();
+        let listening = listening_talk || listening_ai;
         let mood = if thinking {
             OrbMood::Thinking
         } else if listening {
@@ -7555,8 +7541,27 @@ impl AppWindow {
         } else {
             OrbMood::Idle
         };
-        let talk_keys = self.settings.dictation_hotkey.keycaps();
-        let ai_keys = self.settings.edit_hotkey.keycaps();
+        let level = if stage == "listening" {
+            0.62
+        } else {
+            crate::home_capture::level()
+        };
+        let talk_emphasis = window.spring_when("talk-card", listening_talk, SPRING_SNAP);
+        let ai_emphasis = window.spring_when("ai-card", listening_ai || thinking, SPRING_SNAP);
+        let talk_hint = if listening_talk {
+            tr("Click again to finish.").to_string()
+        } else {
+            hotkey_label(&self.settings.dictation_hotkey)
+        };
+        let ai_hint = if listening_ai || thinking {
+            tr("Click again to finish.").to_string()
+        } else {
+            hotkey_label(&self.settings.edit_hotkey)
+        };
+        let show_cloud = crate::output_instructions::cloud_notice_outstanding()
+            && stage == "idle"
+            && !listening
+            && !thinking;
         div()
             .size_full()
             .flex()
@@ -7593,38 +7598,68 @@ impl AppWindow {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap_4()
-                    .child(voice_orb(mood))
+                    .gap_3()
+                    .child(voice_orb(mood, level))
                     .child(div().text_display().child("Said.ai"))
                     .child(
                         div()
+                            .relative()
                             .w_full()
-                            .flex()
-                            .gap_3()
-                            .child(home_action(
-                                true,
-                                listening,
-                                Icon::Microphone,
-                                tr("Talk"),
-                                tr("Stays on this computer"),
-                                talk_keys,
-                                "talk",
-                                "talk-button",
-                                cx.listener(|this, _, _, cx| this.activate_talk(cx)),
-                            ))
-                            .child(home_action(
-                                false,
-                                thinking,
-                                Icon::Waveform,
-                                tr("Talk to AI"),
-                                tr("Sent to our AI service"),
-                                ai_keys,
-                                "talk-to-ai",
-                                "talk-to-ai-button",
-                                cx.listener(|this, _, _, cx| this.activate_talk_to_ai(cx)),
-                            )),
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top(px(-28.0))
+                                    .w_full()
+                                    .h(px(180.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .size(px(280.0))
+                                            .rounded_full()
+                                            .bg(gpui::rgba((paint(ACCENT) << 8) | 0x12)),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .size(px(150.0))
+                                            .rounded_full()
+                                            .bg(gpui::rgba((paint(ORB_WARM) << 8) | 0x24)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .gap_3()
+                                    .child(home_card(
+                                        true,
+                                        talk_emphasis,
+                                        false,
+                                        tr("Talk"),
+                                        tr("Stays on this computer"),
+                                        talk_hint,
+                                        "talk",
+                                        "talk-button",
+                                        cx.listener(|this, _, _, cx| this.activate_talk(cx)),
+                                    ))
+                                    .child(home_card(
+                                        false,
+                                        ai_emphasis,
+                                        true,
+                                        tr("Talk to AI"),
+                                        tr("Sent to our AI service"),
+                                        ai_hint,
+                                        "talk-to-ai",
+                                        "talk-to-ai-button",
+                                        cx.listener(|this, _, _, cx| this.activate_talk_to_ai(cx)),
+                                    )),
+                            ),
                     )
-                    .child(render_active_instructions(&active, stage != "chips", cx))
+                    .when(!(show_cloud && active.is_empty()), |column| {
+                        column.child(render_active_instructions(&active, stage != "chips", cx))
+                    })
                     .when(downloading, |column| {
                         column.child(
                             div()
@@ -7648,6 +7683,33 @@ impl AppWindow {
                             tr("Could not download the speech model"),
                             error,
                         )))
+                    })
+                    .when(show_cloud, |column| {
+                        column.child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_footnote()
+                                        .text_color(rgb(paint(TEXT_SECONDARY)))
+                                        .text_center()
+                                        .child(tr(
+                                            "Talk to AI sends what you say, and any selected text, to our AI service.",
+                                        )),
+                                )
+                                .child(
+                                    button(ButtonKind::Secondary, tr("Continue"))
+                                        .id("cloud-notice-continue")
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            crate::output_instructions::acknowledge_cloud_notice();
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
                     })
                     .when(!notice.is_empty(), |column| {
                         column.child(
@@ -7847,22 +7909,27 @@ impl AppWindow {
 }
 
 fn home_stage() -> &'static str {
-    match std::env::var("HEX_HOME_STAGE") {
-        Ok(value) if value == "listening" => "listening",
-        Ok(value) if value == "thinking" => "thinking",
-        Ok(value) if value == "chips" => "chips",
-        _ => "idle",
+    // Screenshot staging stays out of release builds.
+    #[cfg(debug_assertions)]
+    {
+        match std::env::var("HEX_HOME_STAGE") {
+            Ok(value) if value == "listening" => return "listening",
+            Ok(value) if value == "thinking" => return "thinking",
+            Ok(value) if value == "chips" => return "chips",
+            _ => {}
+        }
     }
+    "idle"
 }
 
 #[allow(clippy::too_many_arguments)]
-fn home_action(
+fn home_card(
     filled: bool,
-    recording: bool,
-    glyph: Icon,
+    emphasis: f32,
+    sparkle: bool,
     title: impl IntoElement,
     subtitle: impl IntoElement,
-    keycaps: Vec<String>,
+    hint: impl IntoElement,
     id: &'static str,
     selector: &'static str,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -7877,36 +7944,54 @@ fn home_action(
     } else {
         paint(TEXT_TERTIARY)
     };
-    action_card(filled, recording)
-        .id(id)
-        .debug_selector(move || selector.into())
-        .on_click(on_click)
+    let glyph = if sparkle {
+        home_sparkle_icon(icon_color)
+    } else {
+        home_mic_icon(icon_color)
+    };
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .gap_2()
         .child(
-            div()
-                .w_full()
-                .flex()
-                .items_start()
-                .justify_between()
-                .child(icon(glyph, icon_color))
-                .child(hotkey_keycaps(keycaps, 0.55)),
+            action_card(filled, emphasis)
+                .id(id)
+                .debug_selector(move || selector.into())
+                .active(|card| {
+                    card.bg(if filled {
+                        mix_color(rgb(paint(ACCENT)), rgb(paint(ACCENT_TEXT)), 0.22)
+                    } else {
+                        rgb(paint(ACCENT_SURFACE))
+                    })
+                })
+                .on_click(on_click)
+                .child(glyph)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_body()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_caption()
+                                .text_color(rgb(subtitle_color))
+                                .child(subtitle),
+                        ),
+                ),
         )
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_body()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(rgb(subtitle_color))
-                        .child(subtitle),
-                ),
+                .text_caption()
+                .text_color(rgb(paint(TEXT_TERTIARY)))
+                .text_center()
+                .child(hint),
         )
 }
 
@@ -7968,7 +8053,7 @@ impl Render for AppWindow {
             let sheet = self
                 .settings_sheet
                 .then(|| self.render_settings_sheet(window, cx));
-            let main_content = self.render_simplified_home(cx);
+            let main_content = self.render_simplified_home(window, cx);
             return platform::frame(window_frame())
                 .track_focus(&self.window_focus)
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
@@ -8189,7 +8274,7 @@ fn preview_history() -> Option<History> {
 
 fn voice_action_description(enabled: bool) -> &'static str {
     if enabled {
-        tr("Use the shortcut below with OpenCode to run spoken instructions")
+        tr("Hold the shortcut and say how text should come out.")
     } else {
         tr("Off by default. Its saved shortcut is not reserved until you enable Voice Action.")
     }
@@ -8612,9 +8697,6 @@ fn model_id(key: &str) -> &str {
 }
 
 fn provider_label(provider: &str) -> String {
-    if provider.eq_ignore_ascii_case("opencode") {
-        return "OpenCode".into();
-    }
     provider
         .split(['-', '_'])
         .filter(|part| !part.is_empty())
@@ -9799,7 +9881,8 @@ mod tests {
         assert!(description.contains("not reserved"));
 
         let description = voice_action_description(true);
-        assert!(description.contains("OpenCode"));
+        assert!(description.contains("Hold the shortcut"));
+        assert!(!description.contains("OpenCode"));
         assert!(!description.contains("not reserved"));
     }
 
@@ -10159,7 +10242,7 @@ mod tests {
 
         let selected = model_presentation(&catalog, Some("opencode/example-rewrite")).unwrap();
         assert_eq!(selected.name, "Example Rewrite");
-        assert_eq!(selected.provider, "OpenCode");
+        assert_eq!(selected.provider, "Opencode");
         assert_eq!(selected.key, "opencode/example-rewrite");
         assert!(!selected.is_default);
 
@@ -10195,10 +10278,10 @@ mod tests {
 
         let copy = opencode_unavailable_copy(&state, OpenCodeFeature::VoiceAction).unwrap();
 
-        assert_eq!(copy.title, "OpenCode is unavailable");
+        assert_eq!(copy.title, "The model catalog is unavailable");
         assert_eq!(
             copy.description,
-            "Said.ai could not load the OpenCode model catalog."
+            "Said.ai could not load the model catalog."
         );
         assert_eq!(
             copy.error.as_deref(),
@@ -10214,7 +10297,7 @@ mod tests {
             opencode_unavailable_copy(&ModelCatalogState::Missing, OpenCodeFeature::VoiceAction)
                 .unwrap();
 
-        assert_eq!(copy.title, "Voice Action requires OpenCode");
+        assert_eq!(copy.title, "Voice Action is unavailable");
         assert_eq!(copy.error, None);
         assert!(copy.can_retry);
         assert!(copy.can_open_setup);
@@ -10225,10 +10308,10 @@ mod tests {
         let loading =
             opencode_unavailable_copy(&ModelCatalogState::Loading, OpenCodeFeature::Transformation)
                 .unwrap();
-        assert_eq!(loading.title, "Checking for OpenCode");
+        assert_eq!(loading.title, "Checking…");
         assert_eq!(
             loading.description,
-            "OpenCode transformation will be available after Said.ai connects to OpenCode."
+            "Transformation will be available after Said.ai connects."
         );
         assert!(!loading.can_retry);
         assert!(!loading.can_open_setup);
@@ -10236,10 +10319,10 @@ mod tests {
         let missing =
             opencode_unavailable_copy(&ModelCatalogState::Missing, OpenCodeFeature::Transformation)
                 .unwrap();
-        assert_eq!(missing.title, "Transformation requires OpenCode");
+        assert_eq!(missing.title, "Transformation is unavailable");
         assert_eq!(
             missing.description,
-            "Install and configure OpenCode to transform dictated text."
+            "Transform dictated text after Said.ai connects."
         );
         assert_eq!(missing.error, None);
         assert!(missing.can_retry);
@@ -10248,7 +10331,7 @@ mod tests {
 
         let failed = ModelCatalogState::Failed("catalog failure".into());
         let error = opencode_unavailable_copy(&failed, OpenCodeFeature::Transformation).unwrap();
-        assert_eq!(error.title, "OpenCode is unavailable");
+        assert_eq!(error.title, "The model catalog is unavailable");
         assert_eq!(error.error.as_deref(), Some("catalog failure"));
         assert!(error.can_retry);
         assert!(!error.can_open_setup);

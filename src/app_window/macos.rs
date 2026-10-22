@@ -457,6 +457,19 @@ impl AppWindow {
 
     pub(super) fn set_listening(&mut self, _: bool) {}
 
+    /// A home card starts or finishes a capture in this process. The listener
+    /// applies it; the click does not synthesize a key.
+    pub(super) fn platform_toggle_capture(&mut self, voice_action: bool) {
+        if self.preview {
+            return;
+        }
+        crate::home_capture::request(if voice_action {
+            crate::home_capture::HomeRequest::TalkToAi
+        } else {
+            crate::home_capture::HomeRequest::Talk
+        });
+    }
+
     /// Sparkle's state. Sparkle presents the update itself, so installing
     /// starts its check, which offers the found update.
     pub(super) fn platform_software_update(&self) -> Option<SoftwareUpdate> {

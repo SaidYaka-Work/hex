@@ -483,6 +483,26 @@ impl AppWindow {
         }
     }
 
+    /// Ask the service to start or finish a capture. Settings does not own the
+    /// microphone, so the click is an IPC action rather than a local queue.
+    pub(super) fn platform_toggle_capture(&mut self, voice_action: bool) {
+        if self.preview {
+            return;
+        }
+        if !self.listener_running() {
+            self.set_listening(true);
+        }
+        if let Err(error) =
+            self.platform
+                .client
+                .send(Request::Desktop(DesktopAction::ToggleCapture {
+                    voice_action,
+                }))
+        {
+            self.platform.client.error = Some(format!("{error:#}"));
+        }
+    }
+
     /// Only service-managed installs update themselves.
     pub(super) fn platform_software_update(&self) -> Option<SoftwareUpdate> {
         let state = self.platform.client.state.as_ref()?;
