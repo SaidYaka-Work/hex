@@ -59,10 +59,10 @@ if [[ "${1:-}" == --inside ]]; then
   app=$!
   for ((attempt = 0; attempt < 200; attempt++)); do
     kill -0 "$app"
-    if swaymsg -t get_tree -r | grep '"name": "Hex"' >/dev/null; then break; fi
+    if swaymsg -t get_tree -r | grep '"name": "Said.ai"' >/dev/null; then break; fi
     sleep 0.05
   done
-  swaymsg -t get_tree -r | grep '"name": "Hex"' >/dev/null
+  swaymsg -t get_tree -r | grep '"name": "Said.ai"' >/dev/null
 
   # Keep GPUI connected while the paste helper creates a virtual keyboard.
   export HEX_WAYLAND_PASTE_OUTPUT="$HEX_WAYLAND_PASTE_OUTPUT-coexist"
