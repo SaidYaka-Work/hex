@@ -213,7 +213,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
             .bg(rgb(if active { ACCENT_SURFACE } else { SURFACE }))
             .when(!active, |card| {
                 card.cursor_pointer()
-                    .hover(|card| card.bg(rgb(SURFACE_HOVER)))
+                    .hover(|card| card.bg(rgb(paint(SURFACE_HOVER))))
             })
             .child(
                 div()
@@ -237,7 +237,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                                         div()
                                             .text_body()
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(TEXT_PRIMARY))
+                                            .text_color(rgb(paint(TEXT_PRIMARY)))
                                             .child(definition.name),
                                     )
                                     .children(tags),
@@ -247,7 +247,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                     .child(
                         div()
                             .text_caption()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(metadata),
                     ),
             )
@@ -260,10 +260,15 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                     .child(model_metric("WER", definition.quality)),
             )
             .when(definition.id == TranscriptionModelId::ParakeetV3, |card| {
-                card.child(div().text_caption().text_color(rgb(TEXT_TERTIARY)).child(
-                    "Detects language from audio, not the selected language. \
+                card.child(
+                    div()
+                        .text_caption()
+                        .text_color(rgb(paint(TEXT_TERTIARY)))
+                        .child(
+                            "Detects language from audio, not the selected language. \
                              For language-guided transcription, try Whisper.",
-                ))
+                        ),
+                )
             })
             .when_some(progress_bar, |card, (progress, label)| {
                 let indicator = div();
@@ -285,7 +290,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                             div()
                                 .flex_none()
                                 .text_caption()
-                                .text_color(rgb(TEXT_SECONDARY))
+                                .text_color(rgb(paint(TEXT_SECONDARY)))
                                 .child(label),
                         ),
                 )
@@ -315,7 +320,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgba(SCRIM))
+        .bg(rgba(paint(SCRIM)))
         .opacity(open_progress)
         .on_click(cx.listener(|this, _, _, cx| {
             this.dismiss_transcription_picker(cx);
@@ -330,8 +335,8 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                 .flex_col()
                 .rounded(RADIUS_MODAL)
                 .border_1()
-                .border_color(rgb(LINE))
-                .bg(rgb(CANVAS))
+                .border_color(rgb(paint(LINE)))
+                .bg(rgb(paint(CANVAS)))
                 .overflow_hidden()
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .child(
@@ -343,7 +348,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                         .items_center()
                         .justify_between()
                         .border_b_1()
-                        .border_color(rgb(LINE))
+                        .border_color(rgb(paint(LINE)))
                         .child(div().text_headline().child(tr("Local transcription")))
                         .child(
                             icon_button(ButtonKind::Ghost, Icon::Close)
@@ -368,9 +373,9 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                                 .flex_col()
                                 .gap_0p5()
                                 .overflow_y_scroll()
-                                .bg(rgb(SIDEBAR))
+                                .bg(rgb(paint(SIDEBAR)))
                                 .border_r_1()
-                                .border_color(rgb(LINE))
+                                .border_color(rgb(paint(LINE)))
                                 .children(language_rows),
                         )
                         .child(
@@ -417,12 +422,12 @@ fn model_state(label: impl IntoElement) -> gpui::Div {
         .flex_none()
         .items_center()
         .gap_2()
-        .child(status_dot(ACCENT))
+        .child(status_dot(paint(ACCENT)))
         .child(
             div()
                 .text_footnote()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(TEXT_SECONDARY))
+                .text_color(rgb(paint(TEXT_SECONDARY)))
                 .child(label),
         )
 }
@@ -436,14 +441,14 @@ fn model_metric(label: &'static str, value: impl IntoElement) -> gpui::Div {
         .child(
             div()
                 .text_caption()
-                .text_color(rgb(TEXT_TERTIARY))
+                .text_color(rgb(paint(TEXT_TERTIARY)))
                 .child(label),
         )
         .child(
             div()
                 .text_footnote()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(TEXT_SECONDARY))
+                .text_color(rgb(paint(TEXT_SECONDARY)))
                 .child(value),
         )
 }

@@ -163,73 +163,8 @@ pub struct Model {
     pub variant: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecommendedModel {
-    pub id: &'static str,
-    pub preferred_variants: &'static [&'static str],
-}
-
-/// Ranked fast, 100%-protocol-compliant OpenCode models for Voice Action and
-/// dictation rewriting, ordered by latency, cost, and strict paste-ready output
-/// compliance.
-pub const RECOMMENDED_OPENCODE_MODELS: &[RecommendedModel] = &[
-    RecommendedModel {
-        id: "gemini-3.1-flash-lite",
-        preferred_variants: &["minimal", "none", "low"],
-    },
-    RecommendedModel {
-        id: "claude-haiku-4-5",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "gpt-5.4-nano",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "gpt-4.1-mini",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "gpt-4.1-nano",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "gpt-5.4-mini",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "gemini-3-flash",
-        preferred_variants: &["minimal", "none", "low"],
-    },
-    RecommendedModel {
-        id: "gpt-4o-mini",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "gpt-4.1",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "gpt-5.4",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "claude-sonnet-4-6",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "claude-sonnet-4-5",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "gemini-2.5-flash-lite",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-    RecommendedModel {
-        id: "gemini-2.5-flash",
-        preferred_variants: &["none", "minimal", "low"],
-    },
-];
+// Said.ai does not ship a user-facing OpenCode or OpenRouter model list.
+// The language model, once the owner picks one, is `llm_backend::LLM_BACKEND`.
 
 #[derive(Clone)]
 struct ContextualProfile {
@@ -291,6 +226,15 @@ impl Profiles {
     pub fn processes(&self, context: &ContextSnapshot) -> bool {
         let profile = self.select(context);
         profile.ai_enabled || !profile.transformations.is_empty()
+    }
+
+    /// Talk never asks OpenCode or OpenRouter to rewrite a transcript.
+    pub fn without_language_model(mut self) -> Self {
+        self.default = self.default.ai_enabled(false);
+        for contextual in &mut self.contextual {
+            contextual.profile = contextual.profile.clone().ai_enabled(false);
+        }
+        self
     }
 
     pub fn process_cancellable(
@@ -495,62 +439,13 @@ impl ModelCatalog {
     }
 }
 
-fn leaf_model_id(key: &str) -> &str {
-    key.rsplit_once('/').map_or(key, |(_, id)| id)
+fn recommended_variant_for_choice(_choice: &ModelChoice) -> Option<&str> {
+    None
 }
 
-fn matches_recommended_model_id(leaf: &str, recommended_id: &str) -> bool {
-    if leaf == recommended_id {
-        return true;
-    }
-    let Some(suffix) = leaf.strip_prefix(recommended_id) else {
-        return false;
-    };
-    suffix == "-preview"
-        || suffix == "-latest"
-        || (suffix.starts_with("-20") && suffix[1..].bytes().all(|byte| byte.is_ascii_digit()))
-}
-
-fn recommendation_entry_for_key(key: &str) -> Option<(usize, &'static RecommendedModel)> {
-    let leaf = leaf_model_id(key);
-    RECOMMENDED_OPENCODE_MODELS
-        .iter()
-        .enumerate()
-        .find(|(_, rec)| matches_recommended_model_id(leaf, rec.id))
-}
-
-fn recommended_variant_for_choice(choice: &ModelChoice) -> Option<&str> {
-    let (_, rec) = recommendation_entry_for_key(&choice.key)?;
-    rec.preferred_variants
-        .iter()
-        .copied()
-        .find(|preferred| choice.variants.iter().any(|v| v == *preferred))
-}
-
-fn provider_priority(provider: &str) -> usize {
-    match provider {
-        "google" | "anthropic" | "openai" => 0,
-        "opencode" => 1,
-        "github-copilot" => 2,
-        p if p.starts_with("console-") => 3,
-        _ => 4,
-    }
-}
-
-fn ranked_choice_indices(choices: &[ModelChoice]) -> Vec<usize> {
-    let mut ranked = Vec::new();
-    for rec in RECOMMENDED_OPENCODE_MODELS {
-        if let Some((best_idx, _)) = choices
-            .iter()
-            .enumerate()
-            .filter(|(_, choice)| matches_recommended_model_id(leaf_model_id(&choice.key), rec.id))
-            .min_by_key(|(idx, choice)| (provider_priority(&choice.provider), *idx))
-            && !ranked.contains(&best_idx)
-        {
-            ranked.push(best_idx);
-        }
-    }
-    ranked
+/// No model is recommended. Catalog order is the service's own order.
+fn ranked_choice_indices(_choices: &[ModelChoice]) -> Vec<usize> {
+    Vec::new()
 }
 
 #[derive(Deserialize)]
@@ -3083,7 +2978,7 @@ mod tests {
     }
 
     #[test]
-    fn model_catalog_ranks_recommended_models_and_selects_top_available_default_with_variant() {
+    fn model_catalog_keeps_service_order_without_a_recommended_list() {
         let model_info = |provider: &str, id: &str, name: &str, variants: &[&str]| ModelInfo {
             id: id.into(),
             provider_id: provider.into(),
@@ -3120,16 +3015,10 @@ mod tests {
             ),
         ];
 
-        let catalog = build_model_catalog(models.clone(), Some(heavy_default.clone()));
-        assert_eq!(
-            catalog.default_key.as_deref(),
-            Some("google/gemini-3.1-flash-lite")
-        );
-        assert_eq!(
-            catalog.default_name.as_deref(),
-            Some("Gemini 3.1 Flash Lite")
-        );
-        assert_eq!(catalog.default_variant.as_deref(), Some("minimal"));
+        let catalog = build_model_catalog(models, Some(heavy_default));
+        assert_eq!(catalog.default_key.as_deref(), Some("example/heavy-agent"));
+        assert_eq!(catalog.default_name.as_deref(), Some("Heavy Agent"));
+        assert_eq!(catalog.default_variant, None);
         assert_eq!(
             catalog
                 .models
@@ -3137,34 +3026,13 @@ mod tests {
                 .map(|choice| choice.key.as_str())
                 .collect::<Vec<_>>(),
             [
-                "google/gemini-3.1-flash-lite",
-                "anthropic/claude-haiku-4-5-20251001",
-                "openai/gpt-5.4-nano",
                 "example/unranked-a",
+                "openai/gpt-5.4-nano",
+                "anthropic/claude-haiku-4-5-20251001",
+                "google/gemini-3.1-flash-lite",
                 "example/heavy-agent",
             ]
         );
-
-        // Removing the #1 recommendation falls back to #2 (`claude-haiku-4-5`), then #3 (`gpt-5.4-nano` with `none`).
-        let without_gemini: Vec<_> = models
-            .iter()
-            .filter(|m| m.id != "gemini-3.1-flash-lite")
-            .cloned()
-            .collect();
-        let catalog2 = build_model_catalog(without_gemini.clone(), Some(heavy_default.clone()));
-        assert_eq!(
-            catalog2.default_key.as_deref(),
-            Some("anthropic/claude-haiku-4-5-20251001")
-        );
-        assert_eq!(catalog2.default_variant, None);
-
-        let only_nano: Vec<_> = without_gemini
-            .into_iter()
-            .filter(|m| !m.id.starts_with("claude-haiku-4-5"))
-            .collect();
-        let catalog3 = build_model_catalog(only_nano, Some(heavy_default));
-        assert_eq!(catalog3.default_key.as_deref(), Some("openai/gpt-5.4-nano"));
-        assert_eq!(catalog3.default_variant.as_deref(), Some("none"));
     }
 
     #[cfg(not(target_os = "windows"))]

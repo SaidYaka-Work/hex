@@ -99,15 +99,14 @@ pub fn updates_managed() -> bool {
 }
 
 pub fn start() {
-    if updates_managed() {
-        tracing::info!("DisableUpdates is set; Sparkle update checks are disabled");
-        return;
-    }
-    if let Err(error) = start_inner() {
-        tracing::error!(%error, "could not start Sparkle updater");
-    }
+    // Said.ai has no update feed. Leaving Sparkle pointed at the Hex appcast
+    // would replace this app with Hex.
+    tracing::info!("Sparkle is disabled; Said.ai does not check the Hex update feed");
 }
 
+// The packaged updater stays in the tree. Said.ai does not start it, because
+// the only feed it knows would replace this app with Hex.
+#[allow(dead_code)]
 fn start_inner() -> Result<()> {
     MainThreadMarker::new().ok_or_else(|| eyre!("Sparkle must start on the main thread"))?;
     if UPDATER.with(|updater| updater.borrow().is_some()) {
@@ -241,6 +240,7 @@ fn clear_status(status: &AtomicU8, expected: UpdateStatus) {
     );
 }
 
+#[allow(dead_code)]
 fn framework_path() -> Result<Option<PathBuf>> {
     let executable = std::env::current_exe()?;
     let Some(macos_dir) = executable.parent() else {

@@ -622,6 +622,8 @@ struct MetalRenderer {
     processing: Spring,
     post_processing: Spring,
     tuning: HudTuning,
+    /// The pill is showing Talk to AI thinking, not a dictation job.
+    thinking_pill: bool,
 }
 
 impl MetalRenderer {
@@ -702,6 +704,7 @@ impl MetalRenderer {
             processing: Spring::at(0.0),
             post_processing: Spring::at(0.0),
             tuning: HudTuning::default(),
+            thinking_pill: false,
         })
     }
 
@@ -881,6 +884,23 @@ impl MetalRenderer {
 
     fn draw(&mut self, output_time: Option<DisplayOutputTime>) -> bool {
         let now = Instant::now();
+        let thinking = crate::llm_backend::is_thinking();
+        if thinking
+            && matches!(self.phase, Phase::Hidden)
+            && !self.capturing
+            && self.jobs.is_empty()
+        {
+            self.phase = Phase::Transcribing;
+            self.phase_started = now;
+            self.thinking_pill = true;
+            self.exiting = false;
+        } else if self.thinking_pill && !thinking && self.jobs.is_empty() && !self.capturing {
+            self.thinking_pill = false;
+            if matches!(self.phase, Phase::Transcribing) {
+                self.phase = Phase::Hidden;
+                self.phase_started = now;
+            }
+        }
         if self.completion_pending
             && now.duration_since(self.phase_started) >= PROCESSING_MORPH_DURATION
         {

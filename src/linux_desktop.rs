@@ -23,12 +23,18 @@ enum IndicatorState {
     Hidden,
     Recording,
     Processing,
+    Thinking,
+    Notice,
 }
 
 impl IndicatorState {
-    fn for_capture(recording: bool, pending: usize) -> Self {
+    fn for_capture(recording: bool, pending: usize, thinking: bool, notice: bool) -> Self {
         if recording {
             Self::Recording
+        } else if thinking {
+            Self::Thinking
+        } else if notice {
+            Self::Notice
         } else if pending > 0 {
             Self::Processing
         } else {
@@ -41,17 +47,20 @@ impl IndicatorState {
 struct IndicatorSlot {
     generation: u64,
     state: IndicatorState,
+    caption: String,
 }
 
 impl IndicatorSlot {
     fn acquire(&mut self) -> u64 {
         self.generation += 1;
         self.state = IndicatorState::Hidden;
+        self.caption.clear();
         self.generation
     }
-    fn set(&mut self, generation: u64, state: IndicatorState) {
+    fn set(&mut self, generation: u64, state: IndicatorState, caption: &str) {
         if self.generation == generation {
             self.state = state;
+            self.caption = caption.to_string();
         }
     }
 }
@@ -148,21 +157,32 @@ impl LinuxIndicator {
         });
         Self { generation }
     }
-    pub(crate) fn update(&self, recording: bool, pending: usize) {
+    pub(crate) fn update(
+        &self,
+        recording: bool,
+        pending: usize,
+        thinking: bool,
+        notice: bool,
+        caption: &str,
+    ) {
         if let Some(generation) = self.generation {
             runtime()
                 .state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .indicator
-                .set(generation, IndicatorState::for_capture(recording, pending));
+                .set(
+                    generation,
+                    IndicatorState::for_capture(recording, pending, thinking, notice),
+                    caption,
+                );
         }
     }
 }
 
 impl Drop for LinuxIndicator {
     fn drop(&mut self) {
-        self.update(false, 0);
+        self.update(false, 0, false, false, "");
     }
 }
 
@@ -185,23 +205,39 @@ fn run(state: &Mutex<State>, stop: &AtomicBool) -> Result<()> {
     }
     let context = gtk::glib::MainContext::default();
     let mut displayed = IndicatorState::Hidden;
+    let mut displayed_caption = String::new();
     while !stop.load(Ordering::Acquire) {
-        let (desired, position) = {
+        let (desired, caption, position) = {
             let state = state.lock().unwrap_or_else(|error| error.into_inner());
-            (state.indicator.state, state.position)
+            (
+                state.indicator.state,
+                state.indicator.caption.clone(),
+                state.position,
+            )
         };
-        if desired != displayed {
+        if desired != displayed || caption != displayed_caption {
             if let Some((window, label)) = &indicator {
                 match desired {
                     IndicatorState::Hidden => window.hide(),
-                    IndicatorState::Recording | IndicatorState::Processing => {
-                        label.set_text(crate::desktop_i18n::tr(
-                            if desired == IndicatorState::Recording {
+                    IndicatorState::Recording
+                    | IndicatorState::Processing
+                    | IndicatorState::Thinking
+                    | IndicatorState::Notice => {
+                        let fallback =
+                            crate::desktop_i18n::tr(if desired == IndicatorState::Recording {
                                 "Recording"
+                            } else if desired == IndicatorState::Thinking {
+                                "Thinking"
+                            } else if desired == IndicatorState::Notice {
+                                "Open Said.ai to continue"
                             } else {
                                 "Transcribing"
-                            },
-                        ));
+                            });
+                        if caption.is_empty() {
+                            label.set_text(fallback);
+                        } else {
+                            label.set_text(&caption);
+                        }
                         if displayed == IndicatorState::Hidden {
                             place_indicator(window, layer_shell, position);
                         }
@@ -213,6 +249,7 @@ fn run(state: &Mutex<State>, stop: &AtomicBool) -> Result<()> {
                 }
             }
             displayed = desired;
+            displayed_caption = caption;
         }
         for _ in 0..32 {
             if !context.iteration(false) {
@@ -304,19 +341,23 @@ mod tests {
     #[test]
     fn hud_remains_visible_until_all_output_finishes() {
         assert_eq!(
-            IndicatorState::for_capture(true, 2),
+            IndicatorState::for_capture(true, 2, false, false),
             IndicatorState::Recording
         );
         assert_eq!(
-            IndicatorState::for_capture(false, 2),
+            IndicatorState::for_capture(false, 2, false, false),
             IndicatorState::Processing
         );
         assert_eq!(
-            IndicatorState::for_capture(false, 1),
-            IndicatorState::Processing
+            IndicatorState::for_capture(false, 0, true, false),
+            IndicatorState::Thinking
         );
         assert_eq!(
-            IndicatorState::for_capture(false, 0),
+            IndicatorState::for_capture(false, 0, false, true),
+            IndicatorState::Notice
+        );
+        assert_eq!(
+            IndicatorState::for_capture(false, 0, false, false),
             IndicatorState::Hidden
         );
     }
@@ -324,13 +365,14 @@ mod tests {
     fn old_listener_cannot_hide_or_update_a_restarted_hud() {
         let mut slot = IndicatorSlot::default();
         let old = slot.acquire();
-        slot.set(old, IndicatorState::Processing);
+        slot.set(old, IndicatorState::Processing, "");
         let current = slot.acquire();
         assert_eq!(slot.state, IndicatorState::Hidden);
-        slot.set(current, IndicatorState::Recording);
-        slot.set(old, IndicatorState::Hidden);
+        slot.set(current, IndicatorState::Recording, "Recording · Esc");
+        slot.set(old, IndicatorState::Hidden, "");
         assert_eq!(slot.state, IndicatorState::Recording);
-        slot.set(current, IndicatorState::Hidden);
+        assert_eq!(slot.caption, "Recording · Esc");
+        slot.set(current, IndicatorState::Hidden, "");
         assert_eq!(slot.state, IndicatorState::Hidden);
     }
 }

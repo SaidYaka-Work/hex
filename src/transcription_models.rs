@@ -921,9 +921,21 @@ pub fn language_for_model(model: TranscriptionModelId, preferred: &str) -> Optio
         .map(|(code, _)| (*code).to_string())
 }
 
+/// Said.ai always transcribes with Parakeet Unified English. There is no
+/// language or model choice in the app.
+pub fn parakeet_english() -> TranscriptionSelection {
+    TranscriptionSelection {
+        model: TranscriptionModelId::ParakeetUnifiedEnglish,
+        language: "en".into(),
+        recognition_hints: String::new(),
+    }
+}
+
 /// The best starting selection for a dictation language: its first
 /// recommended runtime model. Unknown languages fall back to English, so an
-/// English system starts with Parakeet Unified English.
+/// English system starts with Parakeet Unified English. The app no longer
+/// offers this choice; [`parakeet_english`] is what a launch uses.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn recommended_selection(language: &str) -> TranscriptionSelection {
     let language = LANGUAGES
         .iter()

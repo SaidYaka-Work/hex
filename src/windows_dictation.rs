@@ -37,6 +37,7 @@ enum OutputJob {
     Dictation(Job),
     VoiceAction(Job),
     PasteLast,
+    DeferredPaste(String),
 }
 
 #[derive(Clone, Copy)]
@@ -68,7 +69,6 @@ pub struct WindowsDictationConfig {
     pub history: Option<crate::history::History>,
     pub last_dictation: Arc<Mutex<Option<String>>>,
     pub indicator: Option<crate::windows_indicator::WindowsIndicatorSender>,
-    pub mode_runtime: Arc<RwLock<crate::dictation_modes::ModeRuntime>>,
     pub transformations: Arc<crate::personal_commands::TransformationClient>,
     pub voice_action_model: Arc<RwLock<Option<crate::dictation_processor::Model>>>,
     pub fallback_to_default_device: bool,
@@ -82,10 +82,7 @@ impl WindowsDictationConfig {
             device: settings.microphone.clone(),
             hotkey: WindowsHotkey::from(&settings.dictation_hotkey),
             paste_last_hotkey: settings.paste_last_hotkey.as_ref().map(WindowsHotkey::from),
-            voice_action_hotkey: settings
-                .voice_action
-                .enabled
-                .then(|| WindowsHotkey::from(&settings.edit_hotkey)),
+            voice_action_hotkey: Some(WindowsHotkey::from(&settings.edit_hotkey)),
             double_tap_lock: settings.double_tap_lock,
             double_tap_only: settings.double_tap_only,
             shortcut_mode: settings.shortcut_mode,
@@ -99,9 +96,6 @@ impl WindowsDictationConfig {
             history: None,
             last_dictation: Arc::new(Mutex::new(None)),
             indicator: None,
-            mode_runtime: Arc::new(RwLock::new(
-                crate::dictation_modes::ModeRuntime::from_settings(settings),
-            )),
             transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
             voice_action_model: Arc::new(RwLock::new(voice_action_model(settings))),
             fallback_to_default_device: true,
@@ -152,9 +146,8 @@ pub fn run_with_transcriber(
         history,
         last_dictation,
         indicator,
-        mode_runtime,
         transformations,
-        voice_action_model,
+        voice_action_model: _voice_action_model,
         fallback_to_default_device,
     } = config;
     let _indicator_guard = IndicatorGuard(indicator.clone());
@@ -212,6 +205,11 @@ pub fn run_with_transcriber(
     let engine = TranscriptionEngine::start(transcriber)?;
     let mut finishing: Option<Finishing> = None;
     let (jobs, job_receiver) = mpsc::sync_channel::<OutputJob>(2);
+    let jobs_for_ai = jobs.clone();
+    let ai_cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&ai_cancel);
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
     let (result_sender, results) = mpsc::channel();
     let worker = thread::Builder::new()
         .name("windows-dictation-output".into())
@@ -224,11 +222,34 @@ pub fn run_with_transcriber(
                         &mut paster,
                         history.as_ref(),
                         &last_dictation,
-                        &mode_runtime,
                         transformations.as_ref(),
+                        worker_stop.load(Ordering::Acquire),
                     ),
-                    OutputJob::VoiceAction(job) => {
-                        process_voice_action_job(job, &mut paster, &voice_action_model)
+                    OutputJob::VoiceAction(job) => process_voice_action_job(
+                        job,
+                        &mut paster,
+                        jobs_for_ai.clone(),
+                        Arc::clone(&worker_stop),
+                        Arc::clone(&worker_cancel),
+                    ),
+                    OutputJob::DeferredPaste(text) => {
+                        let result =
+                            if crate::output_instructions::copy_for_self(&text, &windows_focus()) {
+                                Ok(())
+                            } else {
+                                paster
+                                    .as_mut()
+                                    .map_err(|error| format!("{error:#}"))
+                                    .and_then(|paster| {
+                                        paster.paste(&text).map_err(|error| format!("{error:#}"))
+                                    })
+                            };
+                        JobResult {
+                            kind: OutputKind::VoiceAction,
+                            text: result.as_ref().ok().map(|_| text),
+                            latency_ms: 0,
+                            result: result.map(|_| ()),
+                        }
                     }
                     OutputJob::PasteLast => process_paste_last(&mut paster, &last_dictation),
                 };
@@ -255,7 +276,7 @@ pub fn run_with_transcriber(
     })?;
     emit_state(&mut events, VoiceState::Listening, &device_label)?;
     println!(
-        "Hex is ready on {}. Hold {} to dictate, release to paste; Escape cancels; Ctrl-C stops.",
+        "Said.ai is ready on {}. Hold {} to dictate, release to paste; Escape cancels; Ctrl-C stops.",
         device_label, hotkey_label
     );
 
@@ -313,12 +334,82 @@ pub fn run_with_transcriber(
                 audio_ready = false;
             }
         }
+        for request in crate::home_capture::take() {
+            if finishing.is_some() {
+                continue;
+            }
+            if recording {
+                if let Some(suppressor) = &audio_suppressor {
+                    suppressor.restore();
+                }
+                recording = false;
+                finishing = Some(begin_finishing(&capture, captured_through, recording_voice));
+                continue;
+            }
+            if start_pending {
+                start_pending = false;
+                pending_voice = false;
+                if let Some(suppressor) = &audio_suppressor {
+                    suppressor.restore();
+                }
+                input.close();
+                audio_ready = false;
+                continue;
+            }
+            let voice = matches!(request, crate::home_capture::HomeRequest::TalkToAi);
+            ai_cancel.store(false, Ordering::Release);
+            crate::output_instructions::clear_inflight_cancel();
+            if !audio_ready && release_while_idle {
+                start_pending = true;
+                pending_voice = voice;
+                input.request_open();
+                if let Some(suppressor) = &audio_suppressor {
+                    suppressor.suppress();
+                }
+                events.dictation(DictationPhase::Started, "")?;
+                emit_state(&mut events, VoiceState::Dictating, &device_label)?;
+                continue;
+            }
+            if !audio_ready {
+                continue;
+            }
+            capture.start_at(captured_through);
+            recording = true;
+            recording_voice = voice;
+            recording_feedback_started = !voice && toggle_mode;
+            start_tone_played = !voice;
+            if !voice {
+                crate::feedback::play_provisional_start();
+            }
+            if let Some(suppressor) = &audio_suppressor {
+                suppressor.suppress();
+            }
+            if let Some(indicator) = &indicator {
+                indicator.send(if voice {
+                    crate::windows_indicator::WindowsIndicatorEvent::EditingStarted
+                } else {
+                    crate::windows_indicator::WindowsIndicatorEvent::Started
+                });
+            }
+            events.dictation(DictationPhase::Started, "")?;
+            emit_state(&mut events, VoiceState::Dictating, &device_label)?;
+        }
+        crate::home_capture::set_active((recording || start_pending).then_some(
+            if recording_voice || pending_voice {
+                crate::home_capture::HomeRequest::TalkToAi
+            } else {
+                crate::home_capture::HomeRequest::Talk
+            },
+        ));
         while finishing.is_none()
             && let Ok(event) = hotkey.events.try_recv()
         {
             let occurred_at = event.occurred_at(captured_through);
             match event.action {
                 HotkeyAction::Start if !recording && audio_ready => {
+                    crate::home_capture::note_hotkey_origin();
+                    ai_cancel.store(false, Ordering::Release);
+                    crate::output_instructions::clear_inflight_cancel();
                     capture.start_at(occurred_at);
                     recording = true;
                     recording_voice = false;
@@ -354,6 +445,9 @@ pub fn run_with_transcriber(
                     emit_state(&mut events, VoiceState::Dictating, &device_label)?;
                 }
                 HotkeyAction::VoiceStart if !recording && audio_ready => {
+                    crate::home_capture::note_hotkey_origin();
+                    ai_cancel.store(false, Ordering::Release);
+                    crate::output_instructions::clear_inflight_cancel();
                     capture.start_at(occurred_at);
                     recording = true;
                     recording_voice = true;
@@ -391,6 +485,13 @@ pub fn run_with_transcriber(
                 | HotkeyAction::VoiceCancel
                     if start_pending =>
                 {
+                    if matches!(
+                        event.action,
+                        HotkeyAction::Cancel | HotkeyAction::VoiceCancel
+                    ) {
+                        ai_cancel.store(true, Ordering::Release);
+                        crate::output_instructions::cancel_inflight();
+                    }
                     pending_voice = false;
                     // Released before the opening microphone produced audio:
                     // nothing was captured, so treat it as a discard.
@@ -450,6 +551,8 @@ pub fn run_with_transcriber(
                     finishing = Some(begin_finishing(&capture, occurred_at, true));
                 }
                 HotkeyAction::VoiceCancel if recording && recording_voice => {
+                    ai_cancel.store(true, Ordering::Release);
+                    crate::output_instructions::cancel_inflight();
                     if let Some(suppressor) = &audio_suppressor {
                         suppressor.restore();
                     }
@@ -498,6 +601,8 @@ pub fn run_with_transcriber(
                     finishing = Some(begin_finishing(&capture, occurred_at, false));
                 }
                 HotkeyAction::Cancel if recording && !recording_voice => {
+                    ai_cancel.store(true, Ordering::Release);
+                    crate::output_instructions::cancel_inflight();
                     if let Some(suppressor) = &audio_suppressor {
                         suppressor.restore();
                     }
@@ -525,6 +630,10 @@ pub fn run_with_transcriber(
                         input.close();
                         audio_ready = false;
                     }
+                }
+                HotkeyAction::Cancel | HotkeyAction::VoiceCancel => {
+                    ai_cancel.store(true, Ordering::Release);
+                    crate::output_instructions::cancel_inflight();
                 }
                 HotkeyAction::PasteLast if !recording => {
                     let queued = pending;
@@ -633,6 +742,7 @@ pub fn run_with_transcriber(
                 }
                 capture.ingest_with_pending(&samples, captured_through, None);
                 if recording {
+                    crate::home_capture::publish_level(&samples);
                     if let Some(indicator) = &indicator {
                         indicator.meter(&samples);
                     }
@@ -729,6 +839,7 @@ pub fn run_with_transcriber(
     emit_state(&mut events, VoiceState::Stopping, &device_label)?;
     drop(hotkey);
     drop(input);
+    stop.store(true, Ordering::Release);
     drop(jobs);
     // Accepted jobs still wait on the engine, so it stops after them.
     if worker.join().is_err() {
@@ -746,8 +857,8 @@ fn process_dictation_job(
     paster: &mut Result<WindowsPaster>,
     history: Option<&crate::history::History>,
     last_dictation: &Mutex<Option<String>>,
-    mode_runtime: &RwLock<crate::dictation_modes::ModeRuntime>,
-    transformations: &crate::personal_commands::TransformationClient,
+    _transformations: &crate::personal_commands::TransformationClient,
+    cancelled: bool,
 ) -> JobResult {
     let started = Instant::now();
     // The context read starts now so the UIA walk overlaps inference.
@@ -769,20 +880,25 @@ fn process_dictation_job(
         if raw_text.is_empty() {
             return Err("transcription was empty".into());
         }
-        let mode_runtime = mode_runtime
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let processed = mode_runtime.process(&raw_text, &context, transformations);
-        let text = processed.text.clone();
+        let text = crate::output_instructions::finish_talk_unless_cancelled(&raw_text, cancelled);
+        if cancelled || text.is_empty() {
+            return Err("dictation was cancelled".into());
+        }
+        let processed = crate::dictation_processor::Processed {
+            text: text.clone(),
+            observation: None,
+            transformations: Vec::new(),
+        };
         if text.trim().is_empty() {
             return Err("text replacements produced empty output".into());
         }
-        paster
-            .as_mut()
-            .map_err(|error| format!("{error:#}"))?
-            .paste(&text)
-            .map_err(|error| format!("{error:#}"))?;
+        if !crate::output_instructions::copy_for_self(&text, &windows_focus()) {
+            paster
+                .as_mut()
+                .map_err(|error| format!("{error:#}"))?
+                .paste(&text)
+                .map_err(|error| format!("{error:#}"))?;
+        }
         *last_dictation
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(text.clone());
@@ -810,21 +926,24 @@ fn process_dictation_job(
     job_result(OutputKind::Dictation, result, latency_ms)
 }
 
-/// Voice Action replies may take longer than a dictation rewrite.
-const VOICE_ACTION_DEADLINE: Duration = Duration::from_secs(45);
+fn windows_focus() -> crate::output_instructions::FocusRead {
+    match crate::windows_input::foreground_process_stem() {
+        Some(application) => crate::output_instructions::FocusRead::App(application),
+        None => crate::output_instructions::FocusRead::None,
+    }
+}
 
-/// Transcribe the held instruction, pair it with the focused application's
-/// selection, ask OpenCode, and paste the reply.
+/// Transcribe the held instruction and store it. A one-shot rewrite pastes
+/// only when the configured language model returns text.
 fn process_voice_action_job(
     job: Job,
     paster: &mut Result<WindowsPaster>,
-    voice_action_model: &RwLock<Option<crate::dictation_processor::Model>>,
+    jobs: SyncSender<OutputJob>,
+    stop: Arc<AtomicBool>,
+    ai_cancel: Arc<AtomicBool>,
 ) -> JobResult {
     let started = Instant::now();
-    // The context read starts now so the UIA walk overlaps inference.
-    let pending_context = crate::windows_context::begin_capture();
     let transcription = job.transcript.wait().map(|transcribed| transcribed.text);
-    let context = pending_context.finish();
     let result = transcription.and_then(|instruction| {
         if instruction.is_empty() {
             return Err("the voice instruction was empty".into());
@@ -834,28 +953,19 @@ fn process_voice_action_job(
             tracing::warn!(%error, "could not copy the selection for the voice action");
             None
         });
-        let model = voice_action_model
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let processed = crate::dictation_processor::process_voice_action(
-            &instruction,
-            selected.as_deref(),
-            &context,
-            model.as_ref(),
-            VOICE_ACTION_DEADLINE,
-            &AtomicBool::new(false),
-            Instant::now(),
+        let cancel = Arc::clone(&ai_cancel);
+        let shutdown = Arc::clone(&stop);
+        crate::output_instructions::enqueue(
+            instruction,
+            selected,
+            windows_focus(),
+            Arc::new(windows_focus),
+            Arc::new(move || cancel.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire)),
+            move |text| {
+                let _ = jobs.send(OutputJob::DeferredPaste(text));
+            },
         );
-        if let Some(error) = processed
-            .observation
-            .and_then(|observation| observation.fallback)
-        {
-            return Err(error);
-        }
-        let reply = processed.text;
-        paster.paste(&reply).map_err(|error| format!("{error:#}"))?;
-        Ok(reply)
+        Ok(String::new())
     });
     match result {
         Ok(text) => JobResult {

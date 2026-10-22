@@ -28,6 +28,9 @@ pub(crate) struct ReplacementSet {
 }
 
 impl ReplacementSet {
+    // The Windows listener does not run mode replacements, so this constructor
+    // is only reached from tests on that target. macOS and Linux still call it.
+    #[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
     pub(crate) fn new(rules: &[TextReplacement]) -> Self {
         let rules = rules
             .iter()

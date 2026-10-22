@@ -97,6 +97,16 @@ impl WindowsPaster {
         })
     }
 
+    /// Put text on the clipboard and do not synthesize Ctrl-V.
+    pub(crate) fn copy_without_paste(text: &str) -> bool {
+        if text.trim().is_empty() {
+            return false;
+        }
+        arboard::Clipboard::new()
+            .and_then(|mut clipboard| clipboard.set_text(text.to_string()))
+            .is_ok()
+    }
+
     pub fn paste(&mut self, text: &str) -> Result<()> {
         if text.trim().is_empty() {
             return Err(eyre!("refusing to paste an empty transcript"));

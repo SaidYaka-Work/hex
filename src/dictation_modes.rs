@@ -1,19 +1,23 @@
-//! Dictation modes for the Windows and Linux listeners. The focused
-//! application or website selects a mode, and its replacements,
-//! post-processing, and transformations run in the shared
-//! `dictation_processor` order. macOS selects modes through `config`.
+//! Dictation mode matching. Talk does not run it. The tests cover the
+//! matcher, and listeners use [`history_draft`] when they record a paste.
+//! macOS selects modes through `config`.
 
+#[cfg(test)]
 use std::sync::atomic::AtomicBool;
-
+#[cfg(test)]
 use url::Url;
 
+#[cfg(test)]
 use crate::app_settings::{AppSettings, DictationMode};
-use crate::dictation_processor::{PostProcessingSettings, Processed, Profile, Profiles};
+use crate::dictation_processor::Processed;
+#[cfg(test)]
+use crate::dictation_processor::{PostProcessingSettings, Profile, Profiles};
+#[cfg(test)]
 use crate::text_replacements::ReplacementSet;
 
-/// Live mode-processing snapshot. The output worker clones it before any
-/// deadline-bounded OpenCode call, so settings writes never wait on
-/// inference.
+/// Live mode snapshot. Talk does not run it. The tests cover the matcher.
+/// Linux and Windows listeners only use [`history_draft`].
+#[cfg(test)]
 #[derive(Clone)]
 pub struct ModeRuntime {
     replacements: ReplacementSet,
@@ -22,6 +26,7 @@ pub struct ModeRuntime {
     modes: Vec<DictationMode>,
 }
 
+#[cfg(test)]
 impl ModeRuntime {
     pub fn from_settings(settings: &AppSettings) -> Self {
         let processing = &settings.dictation_processing;
@@ -78,6 +83,7 @@ impl ModeRuntime {
 }
 
 /// The history entry for one pasted dictation.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn history_draft(
     raw_text: String,
     processed: &Processed,
@@ -107,6 +113,7 @@ pub fn history_draft(
 /// Whether a mode's applications match the focused application. Windows
 /// and Linux name applications by executable, and a rule matches any
 /// case-insensitive substring of that name ("code" matches "vscode").
+#[cfg(test)]
 fn matches_application(mode: &DictationMode, application: &str) -> bool {
     let application = application.to_lowercase();
     mode.applications.iter().any(|candidate| {
@@ -116,6 +123,7 @@ fn matches_application(mode: &DictationMode, application: &str) -> bool {
 }
 
 /// Whether a mode's websites match the focused page's exact host.
+#[cfg(test)]
 fn matches_website(mode: &DictationMode, host: &str) -> bool {
     let host = normalize_host(host);
     mode.browser_hosts.iter().any(|candidate| {
@@ -128,6 +136,7 @@ fn matches_website(mode: &DictationMode, host: &str) -> bool {
 /// The first mode matching the focused context. A website rule is more
 /// specific than an application rule, so browser-host matches win, like
 /// the macOS selector ordering.
+#[cfg(test)]
 fn mode_for_context<'a>(
     modes: &'a [DictationMode],
     application: Option<&str>,
@@ -146,6 +155,7 @@ fn mode_for_context<'a>(
 
 /// Hosts compare case-insensitively with any trailing dot removed,
 /// matching the macOS browser-host semantics.
+#[cfg(any(test, target_os = "windows"))]
 pub fn normalize_host(host: &str) -> String {
     host.trim_end_matches('.').to_lowercase()
 }
@@ -153,6 +163,7 @@ pub fn normalize_host(host: &str) -> String {
 /// A website rule entry reduced to its comparable host: bare hosts,
 /// pasted URLs, host:port forms, and IDN text all work, matching the
 /// macOS Websites field.
+#[cfg(test)]
 pub fn canonical_host(entry: &str) -> Option<String> {
     let entry = entry.trim();
     if entry.is_empty() {

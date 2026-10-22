@@ -24,6 +24,66 @@ HEX                                      // macOS release
 └── Maintain the app                     // menu bar, login, updates, quit
 ```
 
+The running window is Said.ai. Talk holds the dictation shortcut, or the Talk
+card, and pastes local speech. Talk never calls a language model. Talk to AI
+holds the second shortcut, or its card, and asks `llm_backend::LLM_SLOT` for
+one JSON chat completion. The baked slot is Google's OpenAI-compatible
+endpoint (`https://generativelanguage.googleapis.com/v1beta/openai`, model
+`gemini-3.5-flash-lite`, key variable `GEMINI_API_KEY`). OpenRouter is the
+same client with base `https://openrouter.ai/api/v1`. The window never names
+a model or provider.
+
+Remote config (`SAID_AI_CONFIG_URL`, cached as `ai-slot.json`) may change
+`base_url` and `model` only. The host must be `generativelanguage.googleapis.com`,
+`openrouter.ai`, or the placeholder `ai.saidyaka.com`, with no port and no
+userinfo. The signed slot carries a version, `issued_at`, and `expires_at`.
+The signature covers those fields plus the base URL and model. An expired
+slot is not used. The highest version ever accepted is stored on the cache
+and is not forgotten when that document expires, so an older version is
+rejected even when its own expiry is still in the future. The key variable is
+not in the document: each allowlisted host maps to one baked environment
+variable (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, or `SAID_AI_API_KEY`).
+There is no `SAID_AI_KEY_VARIABLE` override. An unsigned, invalid, or
+off-list document is ignored, and the cache is checked with the same rules.
+`SAID_AI_BASE_URL` must also be allowlisted. The matching private key is not
+in this repo, so a remote document stays ignored until the owner replaces
+the public key and signs one. A proxy at `ai.saidyaka.com` is the planned
+place that would hold the key and the model id. It is not deployed.
+
+The model sees the spoken request and any selected text, never the last Talk
+transcript. An utterance that is only an instruction updates the chip and
+pastes nothing. A true one-off, with no "for now" or "always" (for example
+"translate this to Spanish" said once), applies to the current selection and
+is not stored. With nothing selected it pastes nothing and the window says
+there is no text to change yet. A "for now" chip is written to the instruction
+file and is still there after a restart, until the model or the person clears
+it. The cloud notice is on screen before the first Talk to AI send, and
+Continue is what allows that send. The instruction file is re-read when its
+mtime or length changes, so Continue and chips reach a separate settings
+process. If Talk to AI finishes while the notice is still outstanding and
+the window is closed, the HUD says to open Said.ai and the settings process
+is started when its heartbeat is stale. The listener starts that window
+with the `app` argument. On macOS the paste path compares
+`frontmost_bundle_identifier` (`com.saidyaka.said` is this app) and does not
+take a full context snapshot. If Said.ai itself is frontmost, or
+focus moved before the result arrived, the text is copied and the window
+says it can be pasted anywhere. An unreadable focus still copies, with the
+existing notice. `max_tokens` is about three times the estimated input, with
+a floor of 1500. A provider that rejects JSON mode is retried once without
+`response_format`. Whether a key is present is an environment read of the
+host's variable and does not wait on a config fetch. `HEX_HOME_STAGE` exists
+only in debug builds, for screenshots.
+
+A missing key shows a terracotta dot and "Set up AI". Ordinary Talk to AI
+speech is rewritten with the active instructions and pasted. "for now" and
+"always" store chips; "always" adds to saved preferences. Talk dictation is
+unchanged by those chips. History retention, voice commands, and mode processing are
+forced off on load. Saved mode text is kept and not applied. History,
+Commands, and Modes are not in the window and have no hotkeys. Transcription
+is pinned to the one local English model, including the first-run download,
+and there is no model or provider picker. Preview fixtures can still render
+the previous pane contents; the navigation list does not.
+
 [Dictation](dictation.md), [Voice Commands](commands.md),
 [Voice Action](voice-action.md), [Meetings](meetings.md), and [Recovery](recovery.md)
 have detailed maps.

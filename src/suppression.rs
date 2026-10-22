@@ -717,6 +717,36 @@ impl DictationHotkey {
         matches!(self.state, State::Recording { .. } | State::Locked)
     }
 
+    /// A home-card click starts a locked capture. Escape or the shortcut still ends it.
+    pub fn arm_click(&mut self) -> Option<HotkeyAction> {
+        if self.is_recording() {
+            return None;
+        }
+        self.state = State::Locked;
+        Some(HotkeyAction::Start)
+    }
+
+    /// The next click finishes a capture that [`Self::arm_click`] locked.
+    /// The home loop calls [`Self::finish_from_home`] directly.
+    #[allow(dead_code)]
+    pub fn release_click(&mut self) -> Option<HotkeyAction> {
+        if !matches!(self.state, State::Locked) {
+            return None;
+        }
+        self.finish_from_home()
+    }
+
+    /// A home-card click ends whatever capture this machine is in.
+    pub fn finish_from_home(&mut self) -> Option<HotkeyAction> {
+        if !self.is_recording() {
+            return None;
+        }
+        self.state = State::Idle {
+            last_release_at: None,
+        };
+        Some(HotkeyAction::Finish)
+    }
+
     pub fn suppresses_recognition(&self) -> bool {
         !matches!(self.state, State::Idle { .. })
     }
@@ -2698,51 +2728,46 @@ mod tests {
     }
 
     #[test]
-    fn voice_action_toggle_preserves_ownership_of_in_progress_key_gestures() {
+    fn talk_to_ai_chord_matches_only_the_saved_binding() {
         use crate::app_settings::{AppSettings, HotkeyKey};
 
         let mut settings = AppSettings::default();
+        let saved = settings.edit_hotkey.clone();
         settings.edit_hotkey.key = Some(HotkeyKey {
             code: 40,
             label: "K".into(),
         });
-        let event = |down| InputEvent::Key {
+        let matching = |down| InputEvent::Key {
             code: 40,
             down,
             flags: OPTION_KEY_MASK | COMMAND_KEY_MASK,
         };
+        let other = InputEvent::Key {
+            code: 41,
+            down: true,
+            flags: OPTION_KEY_MASK | COMMAND_KEY_MASK,
+        };
         for enabled in [false, true] {
-            let mut suppression = ShortcutSuppression::default();
             settings.voice_action.enabled = enabled;
             assert_eq!(
-                suppression.process_all(event(true), settings.runtime_hotkeys(), true, false),
-                enabled
+                settings.edit_hotkey.key.as_ref().map(|key| key.code),
+                Some(40)
             );
-            settings.voice_action.enabled = !enabled;
-            for delivered in [true, false] {
-                assert_eq!(
-                    suppression.process_all(
-                        event(true),
-                        settings.runtime_hotkeys(),
-                        delivered,
-                        false
-                    ),
-                    enabled
-                );
-            }
-            assert_eq!(
-                suppression.process_all(event(false), settings.runtime_hotkeys(), true, false),
-                enabled
-            );
-            assert_eq!(
-                suppression.process_all(event(true), settings.runtime_hotkeys(), true, false),
-                !enabled
-            );
-            assert_eq!(
-                suppression.process_all(event(false), settings.runtime_hotkeys(), true, false),
-                !enabled
-            );
+            let mut pressed = ShortcutSuppression::default();
+            assert!(pressed.process_all(matching(true), settings.runtime_hotkeys(), true, false));
+            let mut undelivered = ShortcutSuppression::default();
+            assert!(!undelivered.process_all(
+                matching(true),
+                settings.runtime_hotkeys(),
+                false,
+                false
+            ));
+            let mut unmatched = ShortcutSuppression::default();
+            assert!(!unmatched.process_all(other, settings.runtime_hotkeys(), true, false));
         }
+        assert_ne!(settings.edit_hotkey, saved);
+        settings.edit_hotkey = saved;
+        assert!(settings.runtime_hotkeys().edit.is_some());
     }
 
     #[test]

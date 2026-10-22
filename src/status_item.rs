@@ -9,7 +9,6 @@ use objc2_app_kit::{NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem};
 use objc2_foundation::{MainThreadMarker, NSData, NSObject, NSSize, NSString};
 
 use crate::app_settings::AppSettings;
-use crate::transcription_models::{MODELS, ModelDefinition, TranscriptionModelId, language_name};
 use crate::transcription_preparation::PreparationStatus;
 
 const IDLE_ICON_PNG: &[u8] = include_bytes!("../assets/icons/menubar-idle@2x.png");
@@ -19,9 +18,6 @@ const STATUS_ICON_POINTS: f64 = 18.0;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatusItemAction {
     OpenSettings,
-    OpenModels,
-    SelectModel(TranscriptionModelId),
-    CancelModelPreparation,
     PasteLast,
     StartMeeting,
     StopMeeting,
@@ -48,23 +44,6 @@ objc2::define_class!(
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: &AnyObject) {
             let _ = self.ivars().actions.try_send(StatusItemAction::OpenSettings);
-        }
-
-        #[unsafe(method(openModels:))]
-        fn open_models(&self, _sender: &AnyObject) {
-            let _ = self.ivars().actions.try_send(StatusItemAction::OpenModels);
-        }
-
-        #[unsafe(method(selectModel:))]
-        fn select_model(&self, sender: &NSMenuItem) {
-            if let Some(model) = model_from_tag(sender.tag()) {
-                let _ = self.ivars().actions.try_send(StatusItemAction::SelectModel(model));
-            }
-        }
-
-        #[unsafe(method(cancelModelPreparation:))]
-        fn cancel_model_preparation(&self, _sender: &AnyObject) {
-            let _ = self.ivars().actions.try_send(StatusItemAction::CancelModelPreparation);
         }
 
         #[unsafe(method(pasteLast:))]
@@ -130,11 +109,6 @@ struct StatusItemController {
     meeting_button: RefCell<(String, bool)>,
     _menu: Retained<NSMenu>,
     _target: Retained<StatusItemTarget>,
-    model_items: Vec<(TranscriptionModelId, Retained<NSMenuItem>)>,
-    model_empty: Retained<NSMenuItem>,
-    model_preparing: Retained<NSMenuItem>,
-    model_cancel: Retained<NSMenuItem>,
-    model_error: Retained<NSMenuItem>,
 }
 
 thread_local! {
@@ -146,7 +120,7 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
         MainThreadMarker::new().ok_or_else(|| eyre!("status item requires the main thread"))?;
     let (actions, receiver) = sync_channel(8);
     let target = StatusItemTarget::new(actions, mtm);
-    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Hex"));
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Said.ai"));
     let meeting_status = add_item(
         &menu,
         &target,
@@ -185,61 +159,6 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
         mtm,
     );
     add_item(&menu, &target, "Settings…", sel!(openSettings:), mtm);
-    let models = NSMenu::initWithTitle(
-        NSMenu::alloc(mtm),
-        &NSString::from_str("Transcription Model"),
-    );
-    models.setAutoenablesItems(false);
-    let heading = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(mtm),
-            &NSString::from_str("Transcription Model"),
-            None,
-            &NSString::new(),
-        )
-    };
-    heading.setSubmenu(Some(&models));
-    menu.addItem(&heading);
-    let model_items = MODELS
-        .iter()
-        .enumerate()
-        .filter(|(_, model)| model.available())
-        .map(|(index, model)| {
-            let item = add_item(&models, &target, model.name, sel!(selectModel:), mtm);
-            item.setTag(index as isize);
-            item.setHidden(true);
-            (model.id, item)
-        })
-        .collect();
-    let model_empty = add_item(
-        &models,
-        &target,
-        "No downloaded models",
-        sel!(openModels:),
-        mtm,
-    );
-    model_empty.setEnabled(false);
-    models.addItem(&NSMenuItem::separatorItem(mtm));
-    let model_preparing = add_item(&models, &target, "Preparing model…", sel!(openModels:), mtm);
-    model_preparing.setEnabled(false);
-    model_preparing.setHidden(true);
-    let model_cancel = add_item(
-        &models,
-        &target,
-        "Cancel Model Switch",
-        sel!(cancelModelPreparation:),
-        mtm,
-    );
-    model_cancel.setHidden(true);
-    let model_error = add_item(
-        &models,
-        &target,
-        "Model switch failed — open Settings…",
-        sel!(openModels:),
-        mtm,
-    );
-    model_error.setHidden(true);
-    add_item(&models, &target, "Manage Models…", sel!(openModels:), mtm);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     if crate::sparkle::updates_managed() {
         // An item without an action is shown disabled.
@@ -262,14 +181,14 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
         );
     }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    add_item(&menu, &target, "Quit Hex", sel!(quit:), mtm);
+    add_item(&menu, &target, "Quit Said.ai", sel!(quit:), mtm);
 
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(-2.0);
     let button = item
         .button(mtm)
         .ok_or_else(|| eyre!("status item button is unavailable"))?;
-    let symbol = status_bar_icon(IDLE_ICON_PNG, "Hex")?;
-    let recording_symbol = status_bar_icon(RECORDING_ICON_PNG, "Hex is recording a meeting")?;
+    let symbol = status_bar_icon(IDLE_ICON_PNG, "Said.ai")?;
+    let recording_symbol = status_bar_icon(RECORDING_ICON_PNG, "Said.ai is recording a meeting")?;
     button.setImage(Some(&symbol));
     item.setMenu(Some(&menu));
 
@@ -287,11 +206,6 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
             meeting_button: RefCell::new((String::new(), false)),
             _menu: menu,
             _target: target,
-            model_items,
-            model_empty,
-            model_preparing,
-            model_cancel,
-            model_error,
         });
     });
     Ok(receiver)
@@ -300,7 +214,7 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
 fn status_bar_icon(png: &[u8], accessibility_description: &str) -> Result<Retained<NSImage>> {
     let data = NSData::with_bytes(png);
     let image = NSImage::initWithData(NSImage::alloc(), &data)
-        .ok_or_else(|| eyre!("could not decode Hex status item icon"))?;
+        .ok_or_else(|| eyre!("could not decode the Said.ai status item icon"))?;
     image.setSize(NSSize::new(STATUS_ICON_POINTS, STATUS_ICON_POINTS));
     image.setTemplate(true);
     image.setAccessibilityDescription(Some(&NSString::from_str(accessibility_description)));
@@ -327,79 +241,12 @@ fn add_item(
     item
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct ModelMenuEntry {
-    model: TranscriptionModelId,
-    title: String,
-    selected: bool,
-    enabled: bool,
-}
-
-fn model_from_tag(tag: isize) -> Option<TranscriptionModelId> {
-    MODELS
-        .get(usize::try_from(tag).ok()?)
-        .filter(|model| model.available())
-        .map(|model| model.id)
-}
-
-fn model_menu_entries(
-    settings: &AppSettings,
-    preparing: bool,
-    installed: impl Fn(&ModelDefinition, &str) -> bool,
-) -> Vec<ModelMenuEntry> {
-    MODELS
-        .iter()
-        .filter(|model| model.available())
-        .filter_map(|model| {
-            let selection = settings.transcription_for_model(model.id);
-            installed(model, &selection.language).then(|| ModelMenuEntry {
-                model: model.id,
-                title: format!("{} · {}", model.name, language_name(&selection.language)),
-                selected: model.id == settings.transcription.model,
-                enabled: !preparing && model.id != settings.transcription.model,
-            })
-        })
-        .collect()
-}
-
 pub fn installed() -> bool {
     STATUS_ITEM.with(|controller| controller.borrow().is_some())
 }
 
-pub fn update_transcription(settings: &AppSettings, status: &PreparationStatus) {
-    STATUS_ITEM.with(|controller| {
-        let controller = controller.borrow();
-        let Some(controller) = controller.as_ref() else {
-            return;
-        };
-        let entries = model_menu_entries(
-            settings,
-            status.model.is_some(),
-            crate::transcription_models::is_installed,
-        );
-        for (model, item) in &controller.model_items {
-            let entry = entries.iter().find(|entry| entry.model == *model);
-            item.setHidden(entry.is_none());
-            if let Some(entry) = entry {
-                item.setTitle(&NSString::from_str(&entry.title));
-                item.setState(if entry.selected { 1 } else { 0 });
-                item.setEnabled(entry.enabled);
-            }
-        }
-        controller.model_empty.setHidden(!entries.is_empty());
-        controller.model_preparing.setHidden(status.model.is_none());
-        controller.model_cancel.setHidden(status.model.is_none());
-        if let Some(model) = status.model {
-            controller
-                .model_preparing
-                .setTitle(&NSString::from_str(&format!(
-                    "Preparing {}…",
-                    crate::transcription_models::definition(model).name,
-                )));
-        }
-        controller.model_error.setHidden(status.error.is_none());
-    });
-}
+/// The menu no longer lists models. Parakeet English stays selected.
+pub fn update_transcription(_settings: &AppSettings, _status: &PreparationStatus) {}
 
 #[derive(Debug, Eq, PartialEq)]
 struct MeetingMenu {
@@ -501,7 +348,6 @@ pub fn update_meeting(state: &crate::meeting_watcher::MeetingMenuState, enabled:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcription_models::TranscriptionSelection;
 
     #[test]
     fn meeting_menu_offers_one_action_per_state() {
@@ -533,55 +379,10 @@ mod tests {
     }
 
     #[test]
-    fn model_menu_only_lists_downloaded_models_with_their_remembered_language() {
-        let mut settings = AppSettings::default();
-        settings.remember_transcription(TranscriptionSelection {
-            model: TranscriptionModelId::WhisperLargeV3Turbo,
-            language: "fr".into(),
-            recognition_hints: String::new(),
-        });
-        settings.remember_transcription(TranscriptionSelection::default());
-        let installed = |model: &ModelDefinition, _: &str| {
-            matches!(
-                model.id,
-                TranscriptionModelId::ParakeetUnifiedEnglish
-                    | TranscriptionModelId::WhisperLargeV3Turbo
-            )
-        };
-        let entries = model_menu_entries(&settings, false, installed);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].title, "Parakeet Unified English · English");
-        assert!(entries[0].selected);
-        assert!(!entries[0].enabled);
-        assert_eq!(entries[1].title, "Whisper large-v3-turbo · French");
-        assert!(!entries[1].selected);
-        assert!(entries[1].enabled);
-        let preparing = model_menu_entries(&settings, true, installed);
-        assert!(preparing.iter().all(|entry| !entry.enabled));
-        assert!(
-            preparing[0].selected,
-            "preparing must not mark the candidate selected"
-        );
-        assert!(model_menu_entries(&settings, false, |_, _| false).is_empty());
-    }
-
-    #[test]
-    fn menu_tags_only_resolve_available_catalog_models() {
-        assert_eq!(model_from_tag(-1), None);
-        assert_eq!(model_from_tag(MODELS.len() as isize), None);
-        for (index, model) in MODELS.iter().enumerate() {
-            assert_eq!(
-                model_from_tag(index as isize),
-                model.available().then_some(model.id)
-            );
-        }
-    }
-
-    #[test]
     fn status_bar_icons_load_as_18pt_retina_templates() {
         for (png, description) in [
-            (IDLE_ICON_PNG, "Hex"),
-            (RECORDING_ICON_PNG, "Hex is recording a meeting"),
+            (IDLE_ICON_PNG, "Said.ai"),
+            (RECORDING_ICON_PNG, "Said.ai is recording a meeting"),
         ] {
             let icon = status_bar_icon(png, description).unwrap();
             assert!(icon.isTemplate());

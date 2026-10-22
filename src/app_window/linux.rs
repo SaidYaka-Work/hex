@@ -14,7 +14,6 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     fun: false,
     modes: true,
     voice_action: true,
-    history: true,
     permissions: false,
     dock_icon: false,
     launch_at_login: false,
@@ -480,6 +479,26 @@ impl AppWindow {
             DesktopAction::StopListening
         };
         if let Err(error) = self.platform.client.send(Request::Desktop(action)) {
+            self.platform.client.error = Some(format!("{error:#}"));
+        }
+    }
+
+    /// Ask the service to start or finish a capture. Settings does not own the
+    /// microphone, so the click is an IPC action rather than a local queue.
+    pub(super) fn platform_toggle_capture(&mut self, voice_action: bool) {
+        if self.preview {
+            return;
+        }
+        if !self.listener_running() {
+            self.set_listening(true);
+        }
+        if let Err(error) =
+            self.platform
+                .client
+                .send(Request::Desktop(DesktopAction::ToggleCapture {
+                    voice_action,
+                }))
+        {
             self.platform.client.error = Some(format!("{error:#}"));
         }
     }

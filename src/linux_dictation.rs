@@ -1,7 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,8 @@ enum OutputJob {
     VoiceAction(Job),
     /// Pastes the newest completed dictation again.
     PasteLast,
+    /// A Talk to AI rewrite that finished off this thread.
+    DeferredPaste(String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -63,26 +65,20 @@ impl Drop for OutputWorker {
     }
 }
 
-/// What happens to a transcript before and after it is pasted: the modes
-/// that process it and the history that keeps it. The service shares it
-/// with the listener so saved settings apply without a restart.
+/// History retention for a pasted transcript. Talk does not run mode processing.
 #[derive(Clone)]
 pub struct DictationOutput {
     pub history: Option<crate::history::History>,
-    pub modes: Arc<RwLock<crate::dictation_modes::ModeRuntime>>,
     pub transformations: Arc<crate::personal_commands::TransformationClient>,
 }
 
 impl DictationOutput {
     pub fn from_settings(
-        settings: &crate::app_settings::AppSettings,
+        _settings: &crate::app_settings::AppSettings,
         history: Option<crate::history::History>,
     ) -> Self {
         Self {
             history,
-            modes: Arc::new(RwLock::new(
-                crate::dictation_modes::ModeRuntime::from_settings(settings),
-            )),
             transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
         }
     }
@@ -97,16 +93,20 @@ impl DictationOutput {
         started: Instant,
     ) -> Result<String> {
         let context = crate::linux_context::capture();
-        let modes = self
-            .modes
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let processed = modes.process(&raw_text, &context, &self.transformations);
+        // Talk is the Parakeet transcript. Mode and OpenCode rewrites stay off
+        // this path; standing instructions apply only through the one backend.
+        let text = crate::output_instructions::finish_talk_unless_cancelled(&raw_text, false);
+        let processed = crate::dictation_processor::Processed {
+            text: text.clone(),
+            observation: None,
+            transformations: Vec::new(),
+        };
         if processed.text.trim().is_empty() {
             return Err(eyre!("text replacements produced empty output"));
         }
-        paster.paste(&processed.text)?;
+        if !crate::output_instructions::copy_for_self(&processed.text, &linux_focus()) {
+            paster.paste(&processed.text)?;
+        }
         if let Some(history) = &self.history {
             let draft = crate::dictation_modes::history_draft(
                 raw_text,
@@ -135,6 +135,7 @@ pub fn run(
     transcriber: Option<LocalTranscriber>,
     hotkey_status: HotkeyStatus,
 ) -> Result<()> {
+    crate::llm_backend::warm_slot();
     let transcriber =
         transcriber.map_or_else(|| LocalTranscriber::load(&settings.transcription), Ok)?;
     // The engine outlives the output worker, which waits on its transcripts.
@@ -169,10 +170,7 @@ pub fn run(
             .paste_last_hotkey
             .as_ref()
             .map(crate::linux_input::LinuxHotkey::from),
-        voice_action: settings
-            .voice_action
-            .enabled
-            .then(|| crate::linux_input::LinuxHotkey::from(&settings.edit_hotkey)),
+        voice_action: Some(crate::linux_input::LinuxHotkey::from(&settings.edit_hotkey)),
     };
     let hotkey = LinuxHotkeyMonitor::start_with(binding, options, hotkey_status)?;
     let wayland_modifiers = hotkey.wayland_modifiers();
@@ -180,18 +178,52 @@ pub fn run(
     let suppressor =
         crate::linux_audio_control::AudioSuppressor::new(settings.recording_audio_behavior);
     let (jobs, job_receiver) = mpsc::sync_channel::<OutputJob>(2);
+    let jobs_for_ai = jobs.clone();
+    let ai_cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&ai_cancel);
     let (result_sender, results) = mpsc::channel();
     let worker_stop = output.stop.clone();
     output.worker = Some(thread::spawn(move || {
         let mut paster = LinuxPaster::new(worker_stop.clone(), paste_with_shift, wayland_modifiers);
         let mut last_dictation: Option<String> = None;
-        while let Ok(job) = job_receiver.recv() {
+        // The worker holds a sender for deferred pastes, so closing the
+        // caller's sender does not wake `recv`. Poll so shutdown can finish.
+        loop {
+            let job = match job_receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(job) => job,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if worker_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             if worker_stop.load(Ordering::Acquire) {
                 break;
             }
             let (job, kind) = match job {
                 OutputJob::Dictation(job) => (job, OutputKind::Dictation),
                 OutputJob::VoiceAction(job) => (job, OutputKind::VoiceAction),
+                OutputJob::DeferredPaste(text) => {
+                    let result = if crate::output_instructions::copy_for_self(&text, &linux_focus())
+                    {
+                        Ok(text)
+                    } else {
+                        paster
+                            .as_mut()
+                            .map_err(|error| eyre!("{error:#}"))
+                            .and_then(|paster| paster.paste(&text).map(|()| text))
+                            .map_err(|error| format!("{error:#}"))
+                    };
+                    if result_sender
+                        .send((OutputKind::VoiceAction, result))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 OutputJob::PasteLast => {
                     let result = last_dictation
                         .clone()
@@ -226,7 +258,16 @@ pub fn run(
                 }
                 let paster = paster.as_mut().map_err(|error| eyre!("{error:#}"))?;
                 if kind == OutputKind::VoiceAction {
-                    return run_voice_action(&text, paster);
+                    return run_voice_action(
+                        &text,
+                        paster,
+                        jobs_for_ai.clone(),
+                        worker_stop.clone(),
+                        Arc::clone(&worker_cancel),
+                    );
+                }
+                if worker_stop.load(Ordering::Acquire) {
+                    return Err(eyre!("dictation stopped"));
                 }
                 output_settings.deliver(text, paster, job.audio_ms, inference_ms, started)
             })()
@@ -311,6 +352,44 @@ pub fn run(
                 &device_label,
             )?;
         }
+        for request in crate::home_capture::take() {
+            if finishing.is_some() {
+                continue;
+            }
+            if capture.is_recording() {
+                finishing = Some(begin_finishing(&capture, captured_through, recording_voice));
+                continue;
+            }
+            if start_pending {
+                start_pending = false;
+                recording_voice = false;
+                suppressor.restore();
+                input.close();
+                audio_ready = false;
+                continue;
+            }
+            let voice = matches!(request, crate::home_capture::HomeRequest::TalkToAi);
+            ai_cancel.store(false, Ordering::Release);
+            crate::output_instructions::clear_inflight_cancel();
+            recording_voice = voice;
+            if audio_ready {
+                start_capture(&mut capture, captured_through, |_| {
+                    if !recording_voice {
+                        feedback::play_provisional_start();
+                    }
+                });
+                stream_when_due(&mut capture, &engine, toggle);
+            } else if release_while_idle {
+                start_pending = true;
+                input.request_open();
+                feedback::prepare();
+            } else {
+                continue;
+            }
+            suppressor.suppress();
+            events.dictation(DictationPhase::Started, "")?;
+            emit_state(&mut events, VoiceState::Dictating, &device_label)?;
+        }
         while finishing.is_none()
             && let Ok(action) = hotkey.events.try_recv()
         {
@@ -318,6 +397,9 @@ pub fn run(
                 HotkeyEvent::Start | HotkeyEvent::VoiceStart
                     if !capture.is_recording() && !start_pending =>
                 {
+                    crate::home_capture::note_hotkey_origin();
+                    ai_cancel.store(false, Ordering::Release);
+                    crate::output_instructions::clear_inflight_cancel();
                     recording_voice = action == HotkeyEvent::VoiceStart;
                     if audio_ready {
                         // An instruction plays no start tone, as on Windows.
@@ -341,6 +423,10 @@ pub fn run(
                 HotkeyEvent::Finish | HotkeyEvent::VoiceFinish | HotkeyEvent::Cancel
                     if start_pending =>
                 {
+                    if action == HotkeyEvent::Cancel {
+                        ai_cancel.store(true, Ordering::Release);
+                        crate::output_instructions::cancel_inflight();
+                    }
                     recording_voice = false;
                     // Released before the opening microphone produced audio:
                     // nothing was captured.
@@ -373,6 +459,8 @@ pub fn run(
                     }
                 }
                 HotkeyEvent::Cancel if capture.is_recording() => {
+                    ai_cancel.store(true, Ordering::Release);
+                    crate::output_instructions::cancel_inflight();
                     recording_voice = false;
                     capture.cancel();
                     feedback::retract_start();
@@ -388,6 +476,10 @@ pub fn run(
                         active_state(capture.is_recording(), pending),
                         &device_label,
                     )?;
+                }
+                HotkeyEvent::Cancel => {
+                    ai_cancel.store(true, Ordering::Release);
+                    crate::output_instructions::cancel_inflight();
                 }
                 _ => {}
             }
@@ -420,7 +512,31 @@ pub fn run(
             )?;
         }
 
-        indicator.update(capture.is_recording() || start_pending, pending);
+        crate::home_capture::set_active((capture.is_recording() || start_pending).then_some(
+            if recording_voice {
+                crate::home_capture::HomeRequest::TalkToAi
+            } else {
+                crate::home_capture::HomeRequest::Talk
+            },
+        ));
+        let thinking = crate::llm_backend::is_thinking();
+        let notice = !capture.is_recording()
+            && !thinking
+            && crate::output_instructions::cloud_notice_outstanding()
+            && crate::output_instructions::last_event()
+                == Some(crate::output_instructions::InstructionEvent::CloudNotice);
+        reveal_settings_window(notice);
+        indicator.update(
+            capture.is_recording() || start_pending,
+            pending,
+            thinking,
+            notice,
+            &if notice {
+                crate::desktop_i18n::tr("Open Said.ai to continue").to_string()
+            } else {
+                hud_caption(capture.is_recording() || start_pending, thinking)
+            },
+        );
         match input.recv_timeout(UPDATE_INTERVAL, !capture.is_recording()) {
             RecoveringAudioInputEvent::Chunk {
                 samples,
@@ -443,6 +559,9 @@ pub fn run(
                     }
                 }
                 capture.ingest(&samples, captured_through);
+                if capture.is_recording() {
+                    crate::home_capture::publish_level(&samples);
+                }
                 capture.become_intentional(captured_through);
                 stream_when_due(&mut capture, &engine, toggle);
             }
@@ -496,7 +615,7 @@ pub fn run(
         capture.cancel();
         events.dictation(DictationPhase::Cancelled, "")?;
     }
-    indicator.update(false, pending);
+    indicator.update(false, pending, false, false, "");
     suppressor.restore();
     emit_state(&mut events, VoiceState::Stopping, &device_label)?;
     output.stop.store(true, Ordering::Release);
@@ -516,25 +635,82 @@ pub fn run(
     Ok(())
 }
 
-/// Pairs the spoken instruction with the selected text, asks OpenCode with
-/// the Voice Action settings, and pastes the reply.
-fn run_voice_action(instruction: &str, paster: &mut LinuxPaster) -> Result<String> {
-    let context = crate::linux_context::capture();
+/// Queues a Talk to AI instruction. Classification and rewrite run off this
+/// thread; a one-shot paste comes back as [`OutputJob::DeferredPaste`].
+fn run_voice_action(
+    instruction: &str,
+    paster: &mut LinuxPaster,
+    jobs: mpsc::SyncSender<OutputJob>,
+    stop: Arc<AtomicBool>,
+    ai_cancel: Arc<AtomicBool>,
+) -> Result<String> {
     let selected = paster.selected_text();
-    let processed = crate::dictation_processor::process_voice_action_cancellable(
-        instruction,
-        selected.as_deref(),
-        &context,
-        &AtomicBool::new(false),
+    let focus = linux_focus();
+    crate::output_instructions::enqueue(
+        instruction.to_string(),
+        selected,
+        focus,
+        Arc::new(linux_focus),
+        Arc::new(move || ai_cancel.load(Ordering::Acquire) || stop.load(Ordering::Acquire)),
+        move |text| {
+            let _ = jobs.send(OutputJob::DeferredPaste(text));
+        },
     );
-    if let Some(error) = processed
-        .observation
-        .and_then(|observation| observation.fallback)
-    {
-        return Err(eyre!(error));
+    Ok(String::new())
+}
+
+fn linux_focus() -> crate::output_instructions::FocusRead {
+    if crate::linux_session::LinuxSession::detect().is_wayland() {
+        return crate::output_instructions::FocusRead::Unreadable;
     }
-    paster.paste(&processed.text)?;
-    Ok(processed.text)
+    match crate::linux_context::capture().application {
+        Some(application) => crate::output_instructions::FocusRead::App(application),
+        None => crate::output_instructions::FocusRead::None,
+    }
+}
+
+fn reveal_settings_window(notice: bool) {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if !notice {
+        STARTED.store(false, Ordering::Release);
+        return;
+    }
+    if crate::output_instructions::window_heartbeat_fresh() {
+        return;
+    }
+    if STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    spawn_settings_window();
+}
+
+fn spawn_settings_window() {
+    #[cfg(not(test))]
+    if let Ok(exe) = std::env::current_exe() {
+        // `app` is explicit so this process opens Settings. A dev binary
+        // whose default command is the listener must not start a second one.
+        let _ = std::process::Command::new(exe)
+            .arg("app")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
+fn hud_caption(recording: bool, thinking: bool) -> String {
+    if !recording && !thinking {
+        return String::new();
+    }
+    let state = if recording {
+        crate::desktop_i18n::tr("Recording")
+    } else {
+        crate::desktop_i18n::tr("Thinking")
+    };
+    match crate::output_instructions::active().into_iter().next() {
+        Some(instruction) => format!("{state} · {} · Esc", instruction.text),
+        None => format!("{state} · Esc"),
+    }
 }
 
 /// Applies the saved sound settings and preloads the tones.

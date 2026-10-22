@@ -236,22 +236,16 @@ mod tests {
     }
 
     #[test]
-    fn an_english_beta_moves_to_the_streaming_model_only_when_installed() {
+    fn an_english_beta_loads_as_parakeet_english() {
         let directory = scratch_directory("streaming");
         fs::write(directory.join("windows-settings.json"), br#"{"transcription": {"model": "parakeet_v3", "language": "en", "recognition_hints": ""}}"#).unwrap();
         let path = directory.join("settings.json");
         crate::app_settings::migrate_legacy_settings(&path).unwrap();
         let settings = AppSettings::load_from(&path).unwrap();
-        use crate::transcription_models::{TranscriptionModelId, definition, is_installed};
-        let expected = if is_installed(
-            definition(TranscriptionModelId::ParakeetUnifiedEnglish),
-            "en",
-        ) {
-            TranscriptionModelId::ParakeetUnifiedEnglish
-        } else {
-            TranscriptionModelId::ParakeetV3
-        };
-        assert_eq!(settings.transcription.model, expected);
+        assert_eq!(
+            settings.transcription.model,
+            crate::transcription_models::TranscriptionModelId::ParakeetUnifiedEnglish
+        );
         let _ = fs::remove_dir_all(directory);
     }
 

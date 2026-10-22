@@ -2,8 +2,8 @@ use std::io::{ErrorKind, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -86,6 +86,33 @@ impl LinuxPaster {
         (!text.trim().is_empty()).then_some(text)
     }
 
+    /// Put text on the clipboard and do not synthesize a paste keystroke.
+    pub(crate) fn copy_without_paste(text: &str) -> bool {
+        if text.trim().is_empty() {
+            return false;
+        }
+        if crate::linux_session::LinuxSession::detect().is_wayland() {
+            let mut copy = Command::new("wl-copy");
+            copy.args(["--type", "text/plain;charset=utf-8"]);
+            let stop = AtomicBool::new(false);
+            return run_helper(copy, text.as_bytes(), &stop, HELPER_TIMEOUT).is_ok();
+        }
+        // The selection owner has to stay alive or other apps read an empty clipboard.
+        let mut held = held_x11_clipboard()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if held.is_none() {
+            *held = Clipboard::new().ok();
+        }
+        let Some(clipboard) = held.as_ref() else {
+            return false;
+        };
+        let atoms = &clipboard.getter.atoms;
+        clipboard
+            .store(atoms.clipboard, atoms.utf8_string, text.as_bytes())
+            .is_ok()
+    }
+
     pub fn paste(&mut self, text: &str) -> Result<()> {
         if text.trim().is_empty() {
             return Err(eyre!("refusing to paste an empty transcript"));
@@ -112,6 +139,11 @@ impl LinuxPaster {
         thread::sleep(PASTE_SETTLE);
         Ok(())
     }
+}
+
+fn held_x11_clipboard() -> &'static Mutex<Option<Clipboard>> {
+    static HELD: OnceLock<Mutex<Option<Clipboard>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(None))
 }
 
 struct X11Paster {

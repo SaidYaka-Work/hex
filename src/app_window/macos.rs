@@ -12,6 +12,7 @@ use gpui::{MouseMoveEvent, ScrollHandle, relative};
 use super::tour::{PermissionControl, permission_control};
 use super::*;
 use crate::commands::{CommandConfig, CommandInfo, CommandScope};
+use crate::design_tokens::paint;
 use crate::desktop_ui::{disabled_menu_item, empty_state, list_section_label, menu_separator};
 use crate::dictation_indicator::{DictationIndicatorEvent, DictationIndicatorSender, HudTuning};
 use crate::meeting::{
@@ -28,7 +29,6 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     fun: true,
     modes: true,
     voice_action: true,
-    history: true,
     permissions: true,
     dock_icon: true,
     launch_at_login: true,
@@ -457,6 +457,19 @@ impl AppWindow {
 
     pub(super) fn set_listening(&mut self, _: bool) {}
 
+    /// A home card starts or finishes a capture in this process. The listener
+    /// applies it; the click does not synthesize a key.
+    pub(super) fn platform_toggle_capture(&mut self, voice_action: bool) {
+        if self.preview {
+            return;
+        }
+        crate::home_capture::request(if voice_action {
+            crate::home_capture::HomeRequest::TalkToAi
+        } else {
+            crate::home_capture::HomeRequest::Talk
+        });
+    }
+
     /// Sparkle's state. Sparkle presents the update itself, so installing
     /// starts its check, which offers the found update.
     pub(super) fn platform_software_update(&self) -> Option<SoftwareUpdate> {
@@ -551,6 +564,7 @@ pub fn commit_transcription_selection(
     Ok(settings)
 }
 
+#[allow(dead_code)]
 pub fn menu_transcription_selection(
     app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
     model: TranscriptionModelId,
@@ -763,7 +777,7 @@ pub(super) fn render_meeting_notes(notes: meeting::MeetingNotes) -> Div {
         .flex_col()
         .gap(px(6.0))
         .border_b_1()
-        .border_color(rgb(LINE))
+        .border_color(rgb(paint(LINE)))
         .child(section_label(tr("Summary")))
         .child(
             div()
@@ -800,7 +814,7 @@ pub(super) fn meeting_status_chip(
     let live =
         matches!(status, MeetingStatus::Starting | MeetingStatus::Recording) && !stop_pending;
     Some(tag(tone, label).when(live, |chip| {
-        chip.child(status_dot(DANGER).size(px(5.0)))
+        chip.child(status_dot(paint(DANGER)).size(px(5.0)))
             .flex_row_reverse()
     }))
 }
@@ -855,10 +869,10 @@ pub(super) fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement
                     .items_center()
                     .gap_3()
                     .text_caption()
-                    .text_color(rgb(TEXT_TERTIARY))
-                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE)))
+                    .text_color(rgb(paint(TEXT_TERTIARY)))
+                    .child(div().h(px(1.0)).flex_1().bg(rgb(paint(LINE))))
                     .child(tr_fill("{} pause", &meeting_length(pause)))
-                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE))),
+                    .child(div().h(px(1.0)).flex_1().bg(rgb(paint(LINE)))),
             )
         })
         .child(
@@ -875,7 +889,7 @@ pub(super) fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement
                         .flex()
                         .gap_2()
                         .text_caption()
-                        .text_color(rgb(TEXT_TERTIARY))
+                        .text_color(rgb(paint(TEXT_TERTIARY)))
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
@@ -894,15 +908,15 @@ pub(super) fn transcript_turn(index: usize, line: &TranscriptLine) -> AnyElement
                         .border_1()
                         .when(mine, |bubble| {
                             bubble
-                                .border_color(rgb(ACCENT_BORDER))
-                                .bg(rgb(ACCENT_SURFACE))
-                                .text_color(rgb(TEXT_PRIMARY))
+                                .border_color(rgb(paint(ACCENT_BORDER)))
+                                .bg(rgb(paint(ACCENT_SURFACE)))
+                                .text_color(rgb(paint(TEXT_PRIMARY)))
                         })
                         .when(!mine, |bubble| {
                             bubble
-                                .border_color(rgb(LINE))
-                                .bg(rgb(CANVAS))
-                                .text_color(rgb(TEXT_SECONDARY))
+                                .border_color(rgb(paint(LINE)))
+                                .bg(rgb(paint(CANVAS)))
+                                .text_color(rgb(paint(TEXT_SECONDARY)))
                         })
                         .text_body()
                         .child(line.text.clone()),
@@ -1107,21 +1121,21 @@ pub(super) fn command_model_notice(
     }
 }
 
-/// A permission's name as System Settings lists it, and what Hex cannot do
+/// A permission's name as System Settings lists it, and what Said.ai cannot do
 /// without it.
 pub(super) fn permission_warning_copy(kind: PermissionKind) -> (&'static str, &'static str) {
     match kind {
         PermissionKind::Microphone => (
             tr("Microphone"),
-            tr("Hex cannot record dictation until microphone access is restored."),
+            tr("Said.ai cannot record dictation until microphone access is restored."),
         ),
         PermissionKind::InputMonitoring => (
             tr("Input Monitoring"),
-            tr("Hex cannot recognize the dictation shortcut in other apps."),
+            tr("Said.ai cannot recognize the dictation shortcut in other apps."),
         ),
         PermissionKind::Accessibility => (
             accessibility_title(),
-            tr("Hex cannot paste completed dictation into the foreground app."),
+            tr("Said.ai cannot paste completed dictation into the foreground app."),
         ),
         PermissionKind::SystemAudio => (
             tr("Screen & System Audio Recording"),
@@ -1853,7 +1867,7 @@ impl AppWindow {
                                             .child(
                                                 div()
                                                     .text_footnote()
-                                                    .text_color(rgb(TEXT_SECONDARY))
+                                                    .text_color(rgb(paint(TEXT_SECONDARY)))
                                                     .child(entry.label.clone()),
                                             )
                                             .child(
@@ -1947,27 +1961,29 @@ impl AppWindow {
             Some(MeetingStatus::Starting) => busy_label(tr("Starting…")).into_any_element(),
             // Recording is a state, not the screen's main action: a neutral
             // button in the same red-dot language as the Recording tag.
-            Some(MeetingStatus::Recording) => button(ButtonKind::Secondary, status_dot(DANGER))
-                .child(tr("Stop & transcribe"))
-                .children(active_meeting.map(|meeting| {
-                    div()
-                        .text_color(rgb(TEXT_TERTIARY))
-                        .child(meeting::format_duration(meeting_duration(meeting)))
-                }))
-                .id("stop-meeting")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.platform.meeting_stop_pending = true;
-                    if let Err(error) = this
-                        .platform
-                        .meeting_requests
-                        .try_send(MeetingRequest::Stop)
-                    {
-                        this.platform.meeting_stop_pending = false;
-                        log_meeting_request_error(error);
-                    }
-                    cx.notify();
-                }))
-                .into_any_element(),
+            Some(MeetingStatus::Recording) => {
+                button(ButtonKind::Secondary, status_dot(paint(DANGER)))
+                    .child(tr("Stop & transcribe"))
+                    .children(active_meeting.map(|meeting| {
+                        div()
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
+                            .child(meeting::format_duration(meeting_duration(meeting)))
+                    }))
+                    .id("stop-meeting")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.platform.meeting_stop_pending = true;
+                        if let Err(error) = this
+                            .platform
+                            .meeting_requests
+                            .try_send(MeetingRequest::Stop)
+                        {
+                            this.platform.meeting_stop_pending = false;
+                            log_meeting_request_error(error);
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }
             _ if self.platform.meeting_refresh_started_ms.is_some() => {
                 busy_label(tr("Starting…")).into_any_element()
             }
@@ -2454,7 +2470,7 @@ impl AppWindow {
                 div()
                     .pb_5()
                     .text_footnote()
-                    .text_color(rgb(TEXT_TERTIARY))
+                    .text_color(rgb(paint(TEXT_TERTIARY)))
                     .child(tr("Writing a title and summary with Apple Intelligence…"))
             })
         });
@@ -2497,8 +2513,8 @@ impl AppWindow {
                             .items_center()
                             .gap_2()
                             .text_caption()
-                            .text_color(rgb(TEXT_TERTIARY))
-                            .child(status_dot(DANGER))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
+                            .child(status_dot(paint(DANGER)))
                             .child(tr("Listening…")),
                     )
                 })
@@ -2551,7 +2567,7 @@ impl AppWindow {
                             .items_center()
                             .gap_2()
                             .child(section_label(transcript_label))
-                            .when(recording, |label| label.child(status_dot(DANGER))),
+                            .when(recording, |label| label.child(status_dot(paint(DANGER)))),
                     )
                     .child(transcript),
             )
@@ -2659,7 +2675,7 @@ impl AppWindow {
                 .child(
                     div()
                         .text_footnote()
-                        .text_color(rgb(TEXT_SECONDARY))
+                        .text_color(rgb(paint(TEXT_SECONDARY)))
                         .child(tr("Voice commands")),
                 )
                 .child(toggle(commands_position))
@@ -2671,7 +2687,7 @@ impl AppWindow {
             .gap_2()
             .child(config_control)
             .when_some(copy_prompt, |controls, prompt| controls.child(prompt))
-            .child(div().mx_1().w(px(1.0)).h_5().bg(rgb(LINE)))
+            .child(div().mx_1().w(px(1.0)).h_5().bg(rgb(paint(LINE))))
             .child(
                 div()
                     .id("commands-enabled")
@@ -3076,7 +3092,7 @@ impl AppWindow {
                     .justify_between()
                     .text_footnote()
                     .child(label)
-                    .child(div().text_color(rgb(TEXT_TERTIARY)).child(display)),
+                    .child(div().text_color(rgb(paint(TEXT_TERTIARY))).child(display)),
             )
             .child(
                 div()
@@ -3092,7 +3108,7 @@ impl AppWindow {
                             .top(px(7.0))
                             .h(px(4.0))
                             .rounded_full()
-                            .bg(rgb(SURFACE_SELECTED)),
+                            .bg(rgb(paint(SURFACE_SELECTED))),
                     )
                     .child(
                         div()
@@ -3102,7 +3118,7 @@ impl AppWindow {
                             .w(relative(value))
                             .h(px(4.0))
                             .rounded_full()
-                            .bg(rgb(ACCENT)),
+                            .bg(rgb(paint(ACCENT))),
                     )
                     .child(
                         div()
@@ -3113,8 +3129,8 @@ impl AppWindow {
                             .size(px(14.0))
                             .rounded_full()
                             .border_2()
-                            .border_color(rgb(TEXT_PRIMARY))
-                            .bg(rgb(SURFACE_SELECTED)),
+                            .border_color(rgb(paint(TEXT_PRIMARY)))
+                            .bg(rgb(paint(SURFACE_SELECTED))),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -3183,8 +3199,13 @@ impl AppWindow {
                         .border_1()
                         .border_color(rgb(if selected { ACCENT } else { LINE }))
                         .bg(rgb(if selected { ACCENT_SURFACE } else { SURFACE }))
-                        .hover(|card| card.bg(rgb(SURFACE_HOVER)))
-                        .child(div().text_caption().text_color(rgb(ACCENT_TEXT)).child(key))
+                        .hover(|card| card.bg(rgb(paint(SURFACE_HOVER))))
+                        .child(
+                            div()
+                                .text_caption()
+                                .text_color(rgb(paint(ACCENT_TEXT)))
+                                .child(key),
+                        )
                         .child(
                             div()
                                 .text_body()
@@ -3194,7 +3215,7 @@ impl AppWindow {
                         .child(
                             div()
                                 .text_caption()
-                                .text_color(rgb(TEXT_TERTIARY))
+                                .text_color(rgb(paint(TEXT_TERTIARY)))
                                 .child(description),
                         )
                         .on_click(
@@ -3290,7 +3311,7 @@ impl AppWindow {
                                     .child(
                                         div()
                                             .text_caption()
-                                            .text_color(rgb(TEXT_TERTIARY))
+                                            .text_color(rgb(paint(TEXT_TERTIARY)))
                                             .child("Queued"),
                                     )
                                     .child(
@@ -3319,11 +3340,11 @@ impl AppWindow {
                             .p_3()
                             .rounded(RADIUS_PANEL)
                             .border_1()
-                            .border_color(rgb(LINE))
-                            .bg(rgb(SURFACE))
+                            .border_color(rgb(paint(LINE)))
+                            .bg(rgb(paint(SURFACE)))
                             .text_monospace()
                             .text_caption()
-                            .text_color(rgb(TEXT_SECONDARY))
+                            .text_color(rgb(paint(TEXT_SECONDARY)))
                             .child(preset),
                     ),
             ))

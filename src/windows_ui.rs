@@ -19,6 +19,7 @@ use winreg::enums::HKEY_LOCAL_MACHINE;
 
 use crate::design_tokens::{
     CAPTION, SURFACE_HOVER, SURFACE_SELECTED, TEXT_PRIMARY, TEXT_SECONDARY, Typography,
+    follow_window, paint,
 };
 
 const FONT_UI: &str = "Segoe UI Variable Text";
@@ -211,8 +212,8 @@ pub(crate) fn caption_brand() -> impl IntoElement {
                 div()
                     .text_step(CAPTION)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(TEXT_SECONDARY))
-                    .child("Hex"),
+                    .text_color(rgb(paint(TEXT_SECONDARY)))
+                    .child("Said.ai"),
             ),
     )
 }
@@ -220,6 +221,7 @@ pub(crate) fn caption_brand() -> impl IntoElement {
 /// The content half of the caption row: a drag region and the window
 /// buttons at the far right.
 pub(crate) fn caption_controls(window: &Window) -> impl IntoElement {
+    follow_window(window);
     let maximize_glyph = if window.is_maximized() {
         "\u{E923}"
     } else {
@@ -238,15 +240,15 @@ pub(crate) fn caption_controls(window: &Window) -> impl IntoElement {
             "caption-minimize",
             WindowControlArea::Min,
             "\u{E921}",
-            SURFACE_HOVER,
-            SURFACE_SELECTED,
+            paint(SURFACE_HOVER),
+            paint(SURFACE_SELECTED),
         ))
         .child(caption_button(
             "caption-maximize",
             WindowControlArea::Max,
             maximize_glyph,
-            SURFACE_HOVER,
-            SURFACE_SELECTED,
+            paint(SURFACE_HOVER),
+            paint(SURFACE_SELECTED),
         ))
         .child(caption_button(
             "caption-close",
@@ -304,8 +306,8 @@ fn caption_button(
         .justify_center()
         .font_family(icon_font())
         .text_size(px(CAPTION_GLYPH_SIZE))
-        .text_color(rgb(TEXT_SECONDARY))
-        .hover(move |button| button.bg(rgb(hover)).text_color(rgb(TEXT_PRIMARY)))
-        .active(move |button| button.bg(rgb(active)).text_color(rgb(TEXT_PRIMARY)))
+        .text_color(rgb(paint(TEXT_SECONDARY)))
+        .hover(move |button| button.bg(rgb(hover)).text_color(rgb(paint(TEXT_PRIMARY))))
+        .active(move |button| button.bg(rgb(active)).text_color(rgb(paint(TEXT_PRIMARY))))
         .child(glyph)
 }

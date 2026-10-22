@@ -18,7 +18,6 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     fun: false,
     modes: true,
     voice_action: true,
-    history: true,
     permissions: false,
     dock_icon: false,
     launch_at_login: true,
@@ -131,7 +130,7 @@ pub fn open(
 
 pub(super) fn window_options(options: WindowOptions) -> WindowOptions {
     WindowOptions {
-        app_id: Some("com.kitlangton.Hex".into()),
+        app_id: Some("com.kitlangton.Said.ai".into()),
         ..options
     }
 }
@@ -384,6 +383,21 @@ impl AppWindow {
             host.stop();
         }
         self.platform.shown = host_view(&host);
+    }
+
+    /// A home card starts or finishes a capture in this process.
+    pub(super) fn platform_toggle_capture(&mut self, voice_action: bool) {
+        if self.preview {
+            return;
+        }
+        if !self.listener_running() {
+            self.set_listening(true);
+        }
+        crate::home_capture::request(if voice_action {
+            crate::home_capture::HomeRequest::TalkToAi
+        } else {
+            crate::home_capture::HomeRequest::Talk
+        });
     }
 
     pub(super) fn platform_software_update(&self) -> Option<SoftwareUpdate> {

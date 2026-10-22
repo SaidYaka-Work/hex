@@ -653,8 +653,10 @@ check:downloads` fails until every download link serves a file; the Site
 workflow runs it and deploys from `main` when the repository has a
 `CLOUDFLARE_API_TOKEN` secret, otherwise deploy from `site` on the Pro with
 `bun run build && bunx wrangler deploy`. Verify the live links afterwards.
-The Rust app is named `Hex`, packaged as `Hex.app`,
-with bundle identifier `com.kitlangton.hex2` and executable `hex`. Kit has approved
+The Rust app is named `Said.ai`, packaged as `Hex.app`,
+with bundle identifier `com.saidyaka.said` and executable `hex`. Sparkle stays
+off so the Hex appcast cannot replace it. Changing the bundle id makes macOS
+ask for permissions again. Kit has approved
 his personal Developer ID signing team `QC99C9JE59` for this app. Signing requires
 an explicit `VOICE_CONTROL_TEAM_ID` and matching `HEX_NOTARY_PROFILE`; the build
 and release scripts verify the selected team rather than assuming an Anomaly team.

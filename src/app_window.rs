@@ -5,11 +5,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, AnyView, App, Bounds, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, KeyDownEvent, Modifiers as GpuiModifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, PathPromptOptions, Pixels, Point, Render, SharedString, StyleRefinement,
-    Subscription, Timer, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowHandle,
-    WindowOptions, actions, deferred, div, img, prelude::*, px, rgb, size,
+    Animation, AnimationExt, AnyElement, AnyView, App, Bounds, Context, Div, Entity, FocusHandle,
+    Focusable, FontWeight, IntoElement, KeyDownEvent, Modifiers as GpuiModifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, Render,
+    SharedString, StyleRefinement, Subscription, Timer, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowHandle, WindowOptions, actions, deferred, div, ease_in_out, img,
+    prelude::*, px, rgb, size,
 };
 
 use crate::app_settings::{
@@ -27,15 +28,17 @@ use crate::desktop_transcription_picker::{
     transcription_selection_is_active,
 };
 use crate::desktop_ui::{
-    ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, danger_menu_item, detail_body,
-    detail_header, detail_placeholder, detail_row, detail_title, disclosure_button,
-    disclosure_frame, dropdown_menu_with_progress, error_message, error_panel, hotkey_keycaps,
-    icon, icon_button, inline_error, list_row, list_row_meta, list_row_title, listener_status,
+    ButtonKind, CardFill, Icon, NavigationIcon, OrbMood, Tone, action_card, busy_label, button,
+    compact_keycaps, danger_menu_item, detail_body, detail_header, detail_placeholder, detail_row,
+    detail_title, disclosure_button, disclosure_frame, dropdown_menu_with_progress, error_message,
+    error_panel, home_mic_icon, home_sparkle_icon, hotkey_keycaps, icon, icon_button, inline_error,
+    instruction_chip, large_button, list_row, list_row_meta, list_row_title, listener_status,
     menu_item, menu_with_progress, mix_color, navigation_item, pane_body, pane_content,
     pane_detail, pane_header, pane_header_with_action, pane_list, pane_scroll_body, panel,
     panel_header, progress_track, section_label, settings_copy, settings_row,
     settings_section_label, sidebar_frame, sliding_segmented_control, sliding_segmented_for,
-    sliding_segmented_item, small_button, status_dot, tag, toggle, truncated_line, window_frame,
+    sliding_segmented_item, small_button, status_dot, tag, toggle, truncated_line, voice_orb,
+    voice_orb_compact, window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_processor::{ModelCatalog, ModelChoice};
@@ -55,7 +58,7 @@ use crate::text_input::{
 };
 use crate::transcription_models::{
     ModelDefinition, ModelRuntime, TranscriptionModelId, TranscriptionSelection, definition,
-    language_name, validate,
+    validate,
 };
 use crate::transcription_preparation::{PreparationStatus, TranscriptionPreparation};
 
@@ -78,6 +81,8 @@ const TOUR_PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_millis(400);
 const MAX_OPENCODE_ERROR_BYTES: usize = 4 * 1024;
 const ACTIVITY_LIMIT: usize = 100;
 const OPENCODE_BETA_DOCS_URL: &str = "https://v2.opencode.ai/";
+/// Approximate Parakeet English download, used only for the home progress track.
+const PARAKEET_DOWNLOAD_BYTES: f32 = 600_000_000.0;
 
 // Each OS supplies the same set of `platform` items: its window state, the
 // capabilities below, window chrome, and the actions only its runtime can
@@ -92,8 +97,7 @@ mod tour;
 pub use platform::open;
 #[cfg(target_os = "macos")]
 pub use platform::{
-    commit_transcription_selection, menu_transcription_selection, open_or_focus, open_preview,
-    refresh_transcription_menu,
+    commit_transcription_selection, open_or_focus, open_preview, refresh_transcription_menu,
 };
 
 /// What the current OS's runtime can do. A missing capability omits its
@@ -107,7 +111,6 @@ struct Capabilities {
     fun: bool,
     modes: bool,
     voice_action: bool,
-    history: bool,
     /// Privacy permissions gate dictation (macOS).
     permissions: bool,
     dock_icon: bool,
@@ -171,7 +174,7 @@ fn microphone_picker_menu(
 
 /// The sidebar's Update button, shown while an update is available.
 fn sidebar_update_button() -> gpui::Stateful<Div> {
-    button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
+    button(ButtonKind::Secondary, status_dot(paint(ACCENT_TEXT)))
         .child(tr("Update"))
         .id("check-for-updates-sidebar")
 }
@@ -218,18 +221,28 @@ fn open_new(
     cx: &mut App,
 ) -> gpui::Result<WindowHandle<AppWindow>> {
     let preview_mode = preview.is_some();
-    let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
+    let (width, height, minimum_width, minimum_height) = if preview_mode {
+        (WINDOW_WIDTH, WINDOW_HEIGHT, MINIMUM_WIDTH, MINIMUM_HEIGHT)
+    } else {
+        (
+            HOME_WINDOW_WIDTH,
+            HOME_WINDOW_HEIGHT,
+            HOME_WINDOW_WIDTH,
+            HOME_WINDOW_HEIGHT,
+        )
+    };
+    let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
     let handle = cx.open_window(
         platform::window_options(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("Hex".into()),
+                title: Some("Said.ai".into()),
                 appears_transparent: true,
                 ..Default::default()
             }),
             is_resizable: !preview_mode,
             is_minimizable: true,
-            window_min_size: Some(size(px(MINIMUM_WIDTH), px(MINIMUM_HEIGHT))),
+            window_min_size: Some(size(px(minimum_width), px(minimum_height))),
             tabbing_identifier: preview_mode.then(|| "hex-preview".into()),
             ..Default::default()
         }),
@@ -474,10 +487,11 @@ impl Pane {
             .into_iter()
             .filter(|pane| match pane {
                 Self::Settings => true,
-                Self::Modes => capabilities.modes,
-                Self::Commands => capabilities.commands,
-                Self::VoiceAction => capabilities.voice_action,
-                Self::History => capabilities.history,
+                // History, Commands, and Modes are not part of the Said.ai window.
+                Self::Modes | Self::Commands | Self::History => false,
+                // Voice Action is not in the running window. Talk to AI uses the
+                // saved instruction shortcut and the configured model slot.
+                Self::VoiceAction => false,
                 Self::Fun => capabilities.fun && fun,
                 Self::Meetings => capabilities.meetings && (developer_features || meetings),
                 Self::HudLab => capabilities.hud_lab && developer_features,
@@ -647,11 +661,11 @@ impl Render for TransformationDrag {
                     .items_center()
                     .rounded(RADIUS_CONTROL)
                     .border_1()
-                    .border_color(rgb(LINE_STRONG))
-                    .bg(rgb(SURFACE_SELECTED))
+                    .border_color(rgb(paint(LINE_STRONG)))
+                    .bg(rgb(paint(SURFACE_SELECTED)))
                     .shadow_lg()
                     .text_body()
-                    .text_color(rgb(TEXT_PRIMARY))
+                    .text_color(rgb(paint(TEXT_PRIMARY)))
                     .child(self.name.clone()),
             )
     }
@@ -708,13 +722,13 @@ fn opencode_unavailable_copy(
 ) -> Option<OpenCodeUnavailableCopy> {
     match state {
         ModelCatalogState::Loading => Some(OpenCodeUnavailableCopy {
-            title: tr("Checking for OpenCode"),
+            title: tr("Checking…"),
             description: match feature {
                 OpenCodeFeature::VoiceAction => {
-                    tr("Voice Action will be available after Hex connects to OpenCode.")
+                    tr("Voice Action will be available after Said.ai connects.")
                 }
                 OpenCodeFeature::Transformation => {
-                    tr("OpenCode transformation will be available after Hex connects to OpenCode.")
+                    tr("Transformation will be available after Said.ai connects.")
                 }
             },
             error: None,
@@ -724,15 +738,15 @@ fn opencode_unavailable_copy(
         }),
         ModelCatalogState::Missing => Some(OpenCodeUnavailableCopy {
             title: match feature {
-                OpenCodeFeature::VoiceAction => tr("Voice Action requires OpenCode"),
-                OpenCodeFeature::Transformation => tr("Transformation requires OpenCode"),
+                OpenCodeFeature::VoiceAction => tr("Voice Action is unavailable"),
+                OpenCodeFeature::Transformation => tr("Transformation is unavailable"),
             },
             description: match feature {
-                OpenCodeFeature::VoiceAction => tr(
-                    "Install and configure OpenCode to turn spoken instructions into paste-ready text.",
-                ),
+                OpenCodeFeature::VoiceAction => {
+                    tr("Turn spoken instructions into paste-ready text.")
+                }
                 OpenCodeFeature::Transformation => {
-                    tr("Install and configure OpenCode to transform dictated text.")
+                    tr("Transform dictated text after Said.ai connects.")
                 }
             },
             error: None,
@@ -741,8 +755,8 @@ fn opencode_unavailable_copy(
             can_open_setup: true,
         }),
         ModelCatalogState::Failed(error) => Some(OpenCodeUnavailableCopy {
-            title: tr("OpenCode is unavailable"),
-            description: tr("Hex could not load the OpenCode model catalog."),
+            title: tr("The model catalog is unavailable"),
+            description: tr("Said.ai could not load the model catalog."),
             error: Some(error.clone()),
             can_retry: true,
             retry_label: tr("Retry"),
@@ -901,7 +915,8 @@ struct NavigationSidebar {
 }
 
 impl Render for NavigationSidebar {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        follow_window(window);
         let items = Pane::all_with_fun(
             platform::CAPABILITIES,
             crate::DEVELOPER_FEATURES_ENABLED,
@@ -960,7 +975,7 @@ impl Render for NavigationSidebar {
                             .flex_none()
                             .pl_3()
                             .text_caption()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(tr_fill("Version {}", env!("CARGO_PKG_VERSION"))),
                     )
                     .children(update_button),
@@ -984,6 +999,7 @@ impl FunWaveformView {
 
 impl Render for FunWaveformView {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        follow_window(window);
         use crate::hex_microphone::DemoSourceKind;
 
         let _frame_guard = crate::motion::begin_frame("FunWaveform");
@@ -1059,7 +1075,7 @@ impl Render for FunWaveformView {
                 .items_center()
                 .gap(px(2.0))
                 .rounded(RADIUS_SMALL)
-                .bg(rgb(SURFACE))
+                .bg(rgb(paint(SURFACE)))
                 .children(bars.iter().enumerate().map(|(idx, &bar_val)| {
                     let bar_ms = ((idx as f64) + 0.5) / (total_bars as f64) * duration_f;
                     let in_span = bar_ms >= demo.span.start_ms && bar_ms <= demo.span.end_ms;
@@ -1090,8 +1106,8 @@ impl Render for FunWaveformView {
             .gap_2p5()
             .rounded(RADIUS_CONTROL)
             .border_1()
-            .border_color(rgb(LINE))
-            .bg(rgb(CANVAS))
+            .border_color(rgb(paint(LINE)))
+            .bg(rgb(paint(CANVAS)))
             .child(
                 div()
                     .h(px(TAG_HEIGHT))
@@ -1108,7 +1124,7 @@ impl Render for FunWaveformView {
                             .child(
                                 div()
                                     .text_footnote()
-                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .text_color(rgb(paint(TEXT_SECONDARY)))
                                     .child(clip_quote),
                             )
                             .child(span_badge),
@@ -1121,7 +1137,7 @@ impl Render for FunWaveformView {
                             .justify_end()
                             .text_caption()
                             .text_monospace()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(format!("{duration_s:.1}s")),
                     ),
             )
@@ -1135,7 +1151,7 @@ impl Render for FunWaveformView {
                             .w(px(80.0))
                             .flex_none()
                             .text_caption()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(tr("You")),
                     )
                     .child(render_waveform_bars(&bars_you, false)),
@@ -1151,7 +1167,7 @@ impl Render for FunWaveformView {
                             .flex_none()
                             .text_caption()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(ACCENT_TEXT))
+                            .text_color(rgb(paint(ACCENT_TEXT)))
                             .child(tr("Call hears")),
                     )
                     .child(render_waveform_bars(&bars_call, true)),
@@ -1192,6 +1208,14 @@ pub struct AppWindow {
     permission_refresh_at: Instant,
     settings: AppSettings,
     settings_load_error: Option<String>,
+    /// What the last home button did, shown under Talk / Talk to AI.
+    home_notice: String,
+    /// The slim settings sheet over the home.
+    settings_sheet: bool,
+    /// Parakeet English download was considered for this window.
+    parakeet_checked: bool,
+    /// Last Talk to AI instruction revision rendered into `home_notice`.
+    instruction_revision: u64,
     #[cfg(test)]
     settings_save_override: Option<fn(&AppSettings) -> color_eyre::Result<()>>,
     microphone_devices: Vec<String>,
@@ -1306,6 +1330,12 @@ impl AppWindow {
                         } else {
                             Duration::from_millis(500)
                         };
+                        let home_live = window.uses_simplified_home()
+                            && (crate::home_capture::active().is_some()
+                                || crate::llm_backend::is_thinking());
+                        if home_live {
+                            interval = Duration::from_millis(80);
+                        }
                         let model_catalog_changed = window.poll_model_catalog();
                         window.retry_model_catalog();
                         let application_catalog_changed = window.poll_application_catalog();
@@ -1314,7 +1344,12 @@ impl AppWindow {
                         let login_item_changed = window.poll_login_item();
                         let personal_commands_changed = window.poll_personal_commands();
                         let personal_workspace_changed = window.poll_personal_workspace();
+                        window.ensure_parakeet();
                         let history_changed = window.poll_history(cx);
+                        if window.uses_simplified_home() {
+                            crate::output_instructions::touch_window_heartbeat();
+                        }
+                        let instructions_changed = window.poll_instructions();
                         let platform_changed = window.poll_platform(cx);
                         let hex_mic_changed = window.poll_hex_microphone(cx);
                         let tour_changed = window.poll_tour(cx);
@@ -1331,8 +1366,10 @@ impl AppWindow {
                             || personal_commands_changed
                             || personal_workspace_changed
                             || history_changed
+                            || instructions_changed
                             || platform_changed
                             || hex_mic_changed
+                            || home_live
                         {
                             cx.notify();
                         }
@@ -1378,7 +1415,7 @@ impl AppWindow {
                     browser_hosts: vec!["github.com".into()],
                     replacements: vec![TextReplacement {
                         matched_phrase: "open code".into(),
-                        output: "OpenCode".into(),
+                        output: "sample".into(),
                     }],
                     transformations: vec!["smart-punctuation".into(), "normalize-links".into()],
                     ..DictationMode::default()
@@ -1386,7 +1423,7 @@ impl AppWindow {
                 mode.post_processing.enabled = !preview.collapse_mode_processing;
                 mode.post_processing.prompt =
                     "Tighten prose and preserve technical terminology.".into();
-                mode.post_processing.model = Some("anthropic/claude-sonnet-4".into());
+                mode.post_processing.model = None;
                 mode.post_processing.variant = Some("medium".into());
                 settings.dictation_processing.modes.push(mode);
             }
@@ -1418,39 +1455,35 @@ impl AppWindow {
         } else if preview_mode {
             (
                 ModelCatalogState::Loaded(ModelCatalog {
-                    models: vec![
-                        ModelChoice {
-                            key: "google/gemini-3.1-flash-lite".into(),
-                            name: "Gemini 3.1 Flash Lite".into(),
-                            provider: "Google".into(),
-                            variants: vec![
-                                "minimal".into(),
-                                "low".into(),
-                                "medium".into(),
-                                "high".into(),
-                            ],
-                        },
-                        ModelChoice {
-                            key: "anthropic/claude-haiku-4-5".into(),
-                            name: "Claude Haiku 4.5".into(),
-                            provider: "Anthropic".into(),
-                            variants: Vec::new(),
-                        },
-                        ModelChoice {
-                            key: "openai/gpt-5.4-nano".into(),
-                            name: "GPT-5.4 Nano".into(),
-                            provider: "OpenAI".into(),
-                            variants: vec!["none".into(), "low".into(), "medium".into()],
-                        },
-                    ],
-                    default_key: Some("google/gemini-3.1-flash-lite".into()),
-                    default_name: Some("Gemini 3.1 Flash Lite".into()),
+                    models: vec![ModelChoice {
+                        key: "sample/model".into(),
+                        name: "Sample model".into(),
+                        provider: "Sample".into(),
+                        variants: vec![
+                            "minimal".into(),
+                            "low".into(),
+                            "medium".into(),
+                            "high".into(),
+                        ],
+                    }],
+                    default_key: Some("sample/model".into()),
+                    default_name: Some("Sample model".into()),
                     default_variant: Some("minimal".into()),
                 }),
                 None,
             )
         } else {
-            (ModelCatalogState::Loading, Some(start_model_catalog_load()))
+            // Production does not contact OpenCode. `Missing` would schedule
+            // a retry, so the catalog is an empty loaded list instead.
+            (
+                ModelCatalogState::Loaded(ModelCatalog {
+                    models: Vec::new(),
+                    default_key: None,
+                    default_name: None,
+                    default_variant: None,
+                }),
+                None,
+            )
         };
         let application_catalog = if preview_mode {
             ApplicationCatalogState::Loaded(Vec::new())
@@ -1574,7 +1607,7 @@ impl AppWindow {
                 cx,
                 tr("Your words will appear here"),
                 if onboarding_preview == Some(OnboardingPreview::TryItLanded) {
-                    tr("Hex turns what I say into text, right where I'm typing.")
+                    tr("Said.ai turns what I say into text, right where I'm typing.")
                 } else {
                     ""
                 },
@@ -1801,6 +1834,10 @@ impl AppWindow {
             _activation_subscription: activation_subscription,
             settings,
             settings_load_error,
+            home_notice: String::new(),
+            settings_sheet: false,
+            parakeet_checked: false,
+            instruction_revision: crate::output_instructions::revision(),
             #[cfg(test)]
             settings_save_override: None,
             personal_commands_status,
@@ -2008,10 +2045,15 @@ impl AppWindow {
 
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn show_settings(&mut self, cx: &mut Context<Self>) {
+        if self.uses_simplified_home() {
+            self.settings_sheet = true;
+            cx.notify();
+            return;
+        }
         self.select_pane(Pane::Settings, cx);
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn show_transcription_models(&mut self, cx: &mut Context<Self>) {
         self.show_settings(cx);
         self.transcription_picker_language = Some(self.settings.transcription.language.clone());
@@ -2717,7 +2759,11 @@ impl AppWindow {
             div()
                 .w_full()
                 .when(!first, |section| {
-                    section.mt_5().pt_5().border_t_1().border_color(rgb(LINE))
+                    section
+                        .mt_5()
+                        .pt_5()
+                        .border_t_1()
+                        .border_color(rgb(paint(LINE)))
                 })
                 .child(section_label(label))
         };
@@ -2750,7 +2796,7 @@ impl AppWindow {
                             div()
                                 .pt_2()
                                 .text_body()
-                                .text_color(rgb(TEXT_PRIMARY))
+                                .text_color(rgb(paint(TEXT_PRIMARY)))
                                 .child(entry.final_text.clone()),
                         ),
                     )
@@ -2760,7 +2806,7 @@ impl AppWindow {
                                 div()
                                     .pt_2()
                                     .text_body()
-                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .text_color(rgb(paint(TEXT_TERTIARY)))
                                     .child(entry.raw_text.clone()),
                             ),
                         )
@@ -2772,7 +2818,7 @@ impl AppWindow {
                             .flex()
                             .flex_col()
                             .border_t_1()
-                            .border_color(rgb(LINE))
+                            .border_color(rgb(paint(LINE)))
                             .when_some(entry.application.clone(), |rows, application| {
                                 rows.child(detail_row(tr("Application"), application))
                             })
@@ -2856,9 +2902,9 @@ impl AppWindow {
             self.hotkey_capture,
             HotkeyCaptureState::Saved { kind: active, .. } if active == kind
         ) {
-            rgb(SUCCESS_SURFACE)
+            rgb(paint(SUCCESS_SURFACE))
         } else {
-            rgb(DANGER_SURFACE)
+            rgb(paint(DANGER_SURFACE))
         };
         let pulse = match &self.hotkey_capture {
             HotkeyCaptureState::Listening {
@@ -2898,7 +2944,7 @@ impl AppWindow {
                             .size(px(5.0 + pulse * 3.0))
                             .ml_2()
                             .rounded_full()
-                            .bg(rgb(DANGER))
+                            .bg(rgb(paint(DANGER)))
                             .opacity(0.6 + pulse * 0.4),
                     )
                     .when(!modifiers.is_empty() && message.is_none(), |content| {
@@ -2914,7 +2960,7 @@ impl AppWindow {
                     .child(
                         div()
                             .text_footnote()
-                            .text_color(rgb(TEXT_SECONDARY))
+                            .text_color(rgb(paint(TEXT_SECONDARY)))
                             .child(label),
                     )
                     .child(
@@ -2949,7 +2995,7 @@ impl AppWindow {
                 .child(
                     div()
                         .text_footnote()
-                        .text_color(rgb(TEXT_SECONDARY))
+                        .text_color(rgb(paint(TEXT_SECONDARY)))
                         .child(tr("Change shortcut")),
                 )
                 .into_any_element(),
@@ -2971,17 +3017,17 @@ impl AppWindow {
             .rounded(RADIUS_CONTROL)
             .border_1()
             .border_color(mix_color(
-                rgb(LINE),
-                rgb(TEXT_SECONDARY),
+                rgb(paint(LINE)),
+                rgb(paint(TEXT_SECONDARY)),
                 control_intensity * 0.55,
             ))
             .bg(mix_color(
-                rgb(CANVAS),
+                rgb(paint(CANVAS)),
                 capture_color,
                 control_intensity * (0.55 + pulse * 0.15),
             ))
             .when(!capture_active, |control| {
-                control.hover(|control| control.bg(rgb(SURFACE_HOVER)))
+                control.hover(|control| control.bg(rgb(paint(SURFACE_HOVER))))
             })
             .child(content)
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -3258,7 +3304,7 @@ impl AppWindow {
                     .items_center()
                     .gap_2()
                     .when(index + 1 < replacement_count, |row| {
-                        row.border_b_1().border_color(rgb(LINE))
+                        row.border_b_1().border_color(rgb(paint(LINE)))
                     })
                     .child(
                         div()
@@ -3312,7 +3358,7 @@ impl AppWindow {
                         .px_4()
                         .py_3()
                         .text_footnote()
-                        .text_color(rgb(TEXT_TERTIARY))
+                        .text_color(rgb(paint(TEXT_TERTIARY)))
                         .child(tr("No corrections in this mode.")),
                 )
             })
@@ -3500,7 +3546,7 @@ impl AppWindow {
             (true, crate::dictation::ShortcutMode::Hold) => {
                 tr_fill("Ready anywhere · Hold {} to dictate", &shortcut)
             }
-            (false, _) => tr_fill("Enable Hex to dictate into any app with {}", &shortcut),
+            (false, _) => tr_fill("Enable Said.ai to dictate into any app with {}", &shortcut),
         };
         let action = button(
             ButtonKind::Secondary,
@@ -3547,7 +3593,7 @@ impl AppWindow {
                                             .child(
                                                 div()
                                                     .text_body()
-                                                    .text_color(rgb(TEXT_PRIMARY))
+                                                    .text_color(rgb(paint(TEXT_PRIMARY)))
                                                     .child(tr(&listener.status).to_string()),
                                             )
                                             .child(truncated_line(FOOTNOTE, hint))
@@ -3560,7 +3606,7 @@ impl AppWindow {
                                                             &failure,
                                                         ),
                                                     )
-                                                    .text_color(rgb(DANGER)),
+                                                    .text_color(rgb(paint(DANGER))),
                                                 )
                                             }),
                                     ),
@@ -3569,7 +3615,10 @@ impl AppWindow {
                     ),
                 )
                 .when_some(listener.error, |card, error| {
-                    card.child(error_message(tr("Hex could not apply this change."), error))
+                    card.child(error_message(
+                        tr("Said.ai could not apply this change."),
+                        error,
+                    ))
                 })
                 .into_any_element(),
         )
@@ -3652,12 +3701,12 @@ impl AppWindow {
             ),
             SoftwareUpdate::Current if !platform::MANUAL_UPDATE_CHECK => div()
                 .text_footnote()
-                .text_color(rgb(TEXT_TERTIARY))
+                .text_color(rgb(paint(TEXT_TERTIARY)))
                 .child(tr("Up to date"))
                 .into_any_element(),
             SoftwareUpdate::Failed if !platform::MANUAL_UPDATE_CHECK => div()
                 .text_footnote()
-                .text_color(rgb(TEXT_TERTIARY))
+                .text_color(rgb(paint(TEXT_TERTIARY)))
                 .child(tr("Check failed; retrying later"))
                 .into_any_element(),
             SoftwareUpdate::Current | SoftwareUpdate::Failed => {
@@ -3674,7 +3723,7 @@ impl AppWindow {
     }
 
     fn render_update_button(&self, label: String, cx: &mut Context<Self>) -> AnyElement {
-        button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
+        button(ButtonKind::Secondary, status_dot(paint(ACCENT_TEXT)))
             .child(label)
             .id("software-update")
             .debug_selector(|| "software-update".into())
@@ -3694,20 +3743,6 @@ impl AppWindow {
             .flatten();
         let hotkey_control = self.render_hotkey_setting_control(HotkeyKind::Dictation, window, cx);
         let paste_last_control = self.render_hotkey_control(HotkeyKind::PasteLast, window, cx);
-        let transcription_model = definition(self.settings.transcription.model);
-        let transcription_label = format!(
-            "{} · {}",
-            language_name(&self.settings.transcription.language),
-            transcription_model.name
-        );
-        let transcription_control = disclosure_button(transcription_label)
-            .id("transcription-model-setting")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.transcription_picker_language =
-                    Some(this.settings.transcription.language.clone());
-                this.clear_transcription_error();
-                cx.notify();
-            }));
         let double_tap_position = self.double_tap_toggle.render_position(window);
         let release_microphone_position = self.release_microphone_toggle.render_position(window);
         let toggle_mode = self.settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
@@ -3816,7 +3851,7 @@ impl AppWindow {
         let launch_at_login_control = if self.launch_at_login_status.is_none() {
             div()
                 .text_footnote()
-                .text_color(rgb(TEXT_TERTIARY))
+                .text_color(rgb(paint(TEXT_TERTIARY)))
                 .child(if self.login_item_worker.is_some() {
                     tr("Checking…")
                 } else {
@@ -3921,8 +3956,8 @@ impl AppWindow {
                 .justify_between()
                 .gap_4()
                 .border_b_1()
-                .border_color(rgb(LINE))
-                .bg(rgb(CANVAS))
+                .border_color(rgb(paint(LINE)))
+                .bg(rgb(paint(CANVAS)))
                 .child(
                     div().flex_1().min_w_0().child(settings_copy(
                         tr("Release the microphone when idle?"),
@@ -3972,11 +4007,6 @@ impl AppWindow {
                 .child(
                     panel()
                         .child(settings_row(
-                            tr("Local transcription"),
-                            tr("Language and on-device speech model"),
-                            transcription_control,
-                        ))
-                        .child(settings_row(
                             tr("Microphone"),
                             tr("Input device for dictation and commands"),
                             div()
@@ -3991,21 +4021,6 @@ impl AppWindow {
                                 )
                                 .children(microphone_picker.map(deferred)),
                         ))
-                        .when(
-                            transcription_model.supports_recognition_hints,
-                            |settings| {
-                                settings.child(settings_row(
-                                    tr("Recognition hints"),
-                                    tr("Names and terms to prime the speech model"),
-                                    div()
-                                        .w(px(320.0))
-                                        .flex_none()
-                                        .child(
-                                            self.transcription_hints.entity.clone(),
-                                        ),
-                                ))
-                            },
-                        )
                         .child(settings_row(
                             tr("Shortcut mode"),
                             if toggle_mode {
@@ -4145,7 +4160,7 @@ impl AppWindow {
                         .when(capabilities.launch_at_login, |panel| panel.child(
                             settings_row(
                                 tr("Launch at login"),
-                                tr("Start Hex when you log in"),
+                                tr("Start Said.ai when you log in"),
                                 launch_at_login_control,
                             )
                             .id("launch-at-login-setting")
@@ -4171,7 +4186,7 @@ impl AppWindow {
                         .when(capabilities.listener_control, |panel| panel.child(
                             settings_row(
                                 tr("Enable on launch"),
-                                tr("Turn Hex on in every app whenever it opens"),
+                                tr("Turn Said.ai on in every app whenever it opens"),
                                 toggle(enable_on_launch_position),
                             )
                             .id("enable-on-launch-setting")
@@ -4187,7 +4202,7 @@ impl AppWindow {
                         .when(capabilities.dock_icon, |panel| panel.child(
                             settings_row(
                                 tr("Show Dock icon"),
-                                tr("Keep Hex in the menu bar when Settings is closed"),
+                                tr("Keep Said.ai in the menu bar when Settings is closed"),
                                 toggle(dock_icon_position),
                             )
                             .id("dock-icon-setting")
@@ -4203,7 +4218,7 @@ impl AppWindow {
                             panel.child(
                                 settings_row(
                                     tr("Interface language"),
-                                    tr("Language of the Hex interface"),
+                                    tr("Language of the Said.ai interface"),
                                     control,
                                 )
                                 .id("interface-language-setting"),
@@ -4222,7 +4237,7 @@ impl AppWindow {
                             panel.child(
                                 settings_row(
                                     tr("Software updates"),
-                                    tr("Checks for new Hex releases in the background"),
+                                    tr("Checks for new Said.ai releases in the background"),
                                     control,
                                 )
                                 .border_b_0()
@@ -4514,14 +4529,14 @@ impl AppWindow {
                     .items_center()
                     .justify_between()
                     .text_footnote()
-                    .child(div().text_color(rgb(TEXT_SECONDARY)).child(label))
+                    .child(div().text_color(rgb(paint(TEXT_SECONDARY))).child(label))
                     .child(
                         div()
                             .min_w(px(56.0))
                             .flex()
                             .justify_end()
                             .text_monospace()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(display),
                     ),
             )
@@ -4535,9 +4550,9 @@ impl AppWindow {
                     .flex()
                     .items_center()
                     .rounded(RADIUS_CONTROL)
-                    .bg(rgb(CANVAS))
+                    .bg(rgb(paint(CANVAS)))
                     .border_1()
-                    .border_color(rgb(LINE))
+                    .border_color(rgb(paint(LINE)))
                     .cursor_pointer()
                     .child(
                         div()
@@ -4545,13 +4560,13 @@ impl AppWindow {
                             .h(px(4.0))
                             .relative()
                             .rounded(RADIUS_KNOB)
-                            .bg(rgb(LINE_STRONG))
+                            .bg(rgb(paint(LINE_STRONG)))
                             .child(
                                 div()
                                     .w(gpui::relative(value))
                                     .h_full()
                                     .rounded(RADIUS_KNOB)
-                                    .bg(rgb(ACCENT)),
+                                    .bg(rgb(paint(ACCENT))),
                             )
                             .child(
                                 div()
@@ -4561,7 +4576,7 @@ impl AppWindow {
                                         .clamp(0.0, TRACK_WIDTH - 24.0)))
                                     .size(px(12.0))
                                     .rounded_full()
-                                    .bg(rgb(TEXT_PRIMARY)),
+                                    .bg(rgb(paint(TEXT_PRIMARY))),
                             ),
                     )
                     .child(
@@ -5053,7 +5068,7 @@ impl AppWindow {
         });
 
         let record_btn = if demo.is_recording {
-            button(ButtonKind::Danger, status_dot(DANGER))
+            button(ButtonKind::Danger, status_dot(paint(DANGER)))
                 .id("fun-demo-record")
                 .min_w(px(124.0))
                 .justify_center()
@@ -5064,7 +5079,7 @@ impl AppWindow {
                     cx.notify();
                 }))
         } else {
-            button(ButtonKind::Secondary, status_dot(DANGER))
+            button(ButtonKind::Secondary, status_dot(paint(DANGER)))
                 .id("fun-demo-record")
                 .min_w(px(124.0))
                 .justify_center()
@@ -5143,7 +5158,7 @@ impl AppWindow {
                                 .flex()
                                 .flex_col()
                                 .border_b_1()
-                                .border_color(rgb(LINE))
+                                .border_color(rgb(paint(LINE)))
                                 .child(
                                     div()
                                         .flex()
@@ -5219,7 +5234,7 @@ impl AppWindow {
                                         .child(
                                             div()
                                                 .text_caption()
-                                                .text_color(rgb(TEXT_TERTIARY))
+                                                .text_color(rgb(paint(TEXT_TERTIARY)))
                                                 .child(tr("Stays in memory")),
                                         ),
                                 ),
@@ -5286,7 +5301,7 @@ impl AppWindow {
                 &copy,
                 "retry-opencode",
                 "open-opencode-setup",
-                tr("Open OpenCode setup"),
+                tr("Open setup"),
                 cx,
             )
             .mt_4();
@@ -5295,7 +5310,7 @@ impl AppWindow {
                     .p_4()
                     .child(settings_copy(copy.title, copy.description))
                     .when_some(copy.error, |card, error| {
-                        card.child(error_panel(tr("OpenCode reported:"), error).mt_3())
+                        card.child(error_panel(tr("Reported:"), error).mt_3())
                     })
                     .when(show_actions, |card| card.child(actions))
                     .into_any_element(),
@@ -5452,11 +5467,7 @@ impl AppWindow {
                 &replacement.matched_phrase,
                 cx,
             ),
-            output: Self::processing_input(
-                tr("Replacement (e.g. OpenCode)"),
-                &replacement.output,
-                cx,
-            ),
+            output: Self::processing_input(tr("Replacement"), &replacement.output, cx),
         }
     }
 
@@ -5464,7 +5475,7 @@ impl AppWindow {
         let entity = cx.new(|cx| {
             TextInput::multiline(
                 cx,
-                tr("Names and terms Whisper should expect, e.g. OpenCode, Effect…"),
+                tr("Names and terms the speech model should expect"),
                 initial,
             )
         });
@@ -5593,7 +5604,7 @@ impl AppWindow {
                 cx,
             ),
             prompt: Self::multiline_processing_input(
-                tr("Describe how OpenCode should rewrite your dictation…"),
+                tr("Describe how dictated text should be rewritten…"),
                 &processing.prompt,
                 cx,
             ),
@@ -5879,7 +5890,7 @@ impl AppWindow {
                         .justify_between()
                         .gap_4()
                         .border_b_1()
-                        .border_color(rgb(LINE))
+                        .border_color(rgb(paint(LINE)))
                         .child(
                             div()
                                 .text_body()
@@ -5892,7 +5903,7 @@ impl AppWindow {
                     panel.child(
                         div()
                             .when(platform::WEB_PAGES_DESCRIPTION.is_some(), |row| {
-                                row.border_b_1().border_color(rgb(LINE))
+                                row.border_b_1().border_color(rgb(paint(LINE)))
                             })
                             .child(picker),
                     )
@@ -5969,7 +5980,7 @@ impl AppWindow {
                 .justify_between()
                 .gap_4()
                 .border_t_1()
-                .border_color(rgb(LINE))
+                .border_color(rgb(paint(LINE)))
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -5998,7 +6009,7 @@ impl AppWindow {
         });
         let processing = panel()
             .child(
-                panel_header(tr("OpenCode transformation"), Some(processing_toggle)).when(
+                panel_header(tr("Transformation"), Some(processing_toggle)).when(
                     !processing_enabled && processing_unavailable.is_none(),
                     |header| header.border_b_0(),
                 ),
@@ -6116,7 +6127,7 @@ impl AppWindow {
                     .items_center()
                     .gap_2()
                     .when(target_index + 1 < selected.len(), |row| {
-                        row.border_b_1().border_color(rgb(LINE))
+                        row.border_b_1().border_color(rgb(paint(LINE)))
                     })
                     .can_drop(move |value, _, _| {
                         value
@@ -6153,7 +6164,7 @@ impl AppWindow {
                     .child(
                         truncated_line(BODY, name)
                             .flex_1()
-                            .text_color(rgb(TEXT_SECONDARY)),
+                            .text_color(rgb(paint(TEXT_SECONDARY))),
                     )
                     .child(
                         icon_button(ButtonKind::Ghost, Icon::Close)
@@ -6188,8 +6199,8 @@ impl AppWindow {
                         .justify_between()
                         .gap_3()
                         .border_t_1()
-                        .border_color(rgb(LINE))
-                        .hover(|row| row.bg(rgb(SURFACE_HOVER)))
+                        .border_color(rgb(paint(LINE)))
+                        .hover(|row| row.bg(rgb(paint(SURFACE_HOVER))))
                         .child(
                             div()
                                 .flex_1()
@@ -6198,7 +6209,7 @@ impl AppWindow {
                                     div()
                                         .text_body()
                                         .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(TEXT_SECONDARY))
+                                        .text_color(rgb(paint(TEXT_SECONDARY)))
                                         .child(name),
                                 )
                                 .when_some(description, |copy, description| {
@@ -6206,7 +6217,7 @@ impl AppWindow {
                                         div()
                                             .pt_0p5()
                                             .text_footnote()
-                                            .text_color(rgb(TEXT_TERTIARY))
+                                            .text_color(rgb(paint(TEXT_TERTIARY)))
                                             .child(description),
                                     )
                                 }),
@@ -6260,11 +6271,11 @@ impl AppWindow {
                             list.child(
                                 div()
                                     .border_t_1()
-                                    .border_color(rgb(LINE))
+                                    .border_color(rgb(paint(LINE)))
                                     .px_4()
                                     .py_3()
                                     .text_footnote()
-                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .text_color(rgb(paint(TEXT_TERTIARY)))
                                     .child(tr(
                                         "Every registered transformation is already included.",
                                     )),
@@ -6328,7 +6339,7 @@ impl AppWindow {
                 .justify_between()
                 .gap_3()
                 .border_t_1()
-                .border_color(rgb(LINE))
+                .border_color(rgb(paint(LINE)))
                 .child(
                     div()
                         .flex_1()
@@ -6376,10 +6387,10 @@ impl AppWindow {
                 .items_center()
                 .gap_1p5()
                 .rounded(RADIUS_SMALL)
-                .bg(rgb(SURFACE_SELECTED))
+                .bg(rgb(paint(SURFACE_SELECTED)))
                 .text_caption()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(TEXT_SECONDARY))
+                .text_color(rgb(paint(TEXT_SECONDARY)))
                 .child(application_icon(
                     application,
                     Some(name.as_str()),
@@ -6469,8 +6480,8 @@ impl AppWindow {
                 .gap_1()
                 .rounded(RADIUS_CONTROL)
                 .border_1()
-                .border_color(rgb(LINE))
-                .bg(rgb(CANVAS))
+                .border_color(rgb(paint(LINE)))
+                .bg(rgb(paint(CANVAS)))
                 .child(self.application_search.entity.clone())
                 .when_some(picker_status, |tray, status| {
                     tray.child(
@@ -6478,7 +6489,7 @@ impl AppWindow {
                             .px_2()
                             .py_3()
                             .text_footnote()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(status),
                     )
                 })
@@ -6740,17 +6751,15 @@ impl AppWindow {
         let query = model.read(cx).text().trim().to_lowercase();
         let presentation = model_presentation(&self.model_catalog, selected_model);
         let (catalog_status, default_label, matches, variants) = match &self.model_catalog {
-            ModelCatalogState::Loading => {
-                (tr("Loading OpenCode…").into(), None, Vec::new(), Vec::new())
-            }
+            ModelCatalogState::Loading => (tr("Loading…").into(), None, Vec::new(), Vec::new()),
             ModelCatalogState::Missing => (
-                tr("OpenCode beta required").into(),
+                tr("Assistant required").into(),
                 None,
                 Vec::new(),
                 Vec::new(),
             ),
             ModelCatalogState::Failed(error) => (
-                tr_fill("OpenCode models unavailable: {}", &error.to_string()),
+                tr_fill("Models unavailable: {}", &error.to_string()),
                 None,
                 Vec::new(),
                 Vec::new(),
@@ -6776,10 +6785,8 @@ impl AppWindow {
                             .default_name
                             .as_ref()
                             .map(|name| match &catalog.default_key {
-                                Some(key) => {
-                                    tr_fill("OpenCode default: {}", &format!("{name} ({key})"))
-                                }
-                                None => tr_fill("OpenCode default: {}", name),
+                                Some(key) => tr_fill("Default: {}", &format!("{name} ({key})")),
+                                None => tr_fill("Default: {}", name),
                             })
                     })
                     .flatten();
@@ -6800,7 +6807,7 @@ impl AppWindow {
                 .when_some(default_label.clone(), |list, label| {
                     list.child(
                         model_choice_row(
-                            tr("Use OpenCode default"),
+                            tr("Use the default"),
                             label,
                             self.model_picker_highlight == 0,
                         )
@@ -6892,13 +6899,13 @@ impl AppWindow {
                     truncated_line(FOOTNOTE, presentation.name)
                         .flex_1()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(TEXT_PRIMARY)),
+                        .text_color(rgb(paint(TEXT_PRIMARY))),
                 )
                 .child(
                     div()
                         .flex_none()
                         .text_caption()
-                        .text_color(rgb(TEXT_TERTIARY))
+                        .text_color(rgb(paint(TEXT_TERTIARY)))
                         .child(presentation.provider),
                 )
                 .when(presentation.is_default, |control| {
@@ -6994,7 +7001,7 @@ impl AppWindow {
             .when_some(suggestions, |field, suggestions| field.child(suggestions));
         panel()
             .child(
-                settings_row(tr("OpenCode model"), catalog_status, model_field)
+                settings_row(tr("Model"), catalog_status, model_field)
                     .when(!has_variants, |row| row.border_b_0()),
             )
             .when(has_variants, |panel| {
@@ -7057,7 +7064,7 @@ impl AppWindow {
                                 matches!(&self.model_catalog, ModelCatalogState::Missing),
                                 |field| {
                                     field.child(
-                                        button(ButtonKind::Secondary, tr("Install OpenCode"))
+                                        button(ButtonKind::Secondary, tr("Install"))
                                             .mt_2()
                                             .id("install-opencode-beta")
                                             .on_click(|_, _, _| open_opencode_beta_docs()),
@@ -7280,9 +7287,9 @@ impl AppWindow {
                             if boundary {
                                 text.text_caption()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .text_color(rgb(paint(TEXT_TERTIARY)))
                             } else {
-                                text.text_body().text_color(rgb(TEXT_SECONDARY))
+                                text.text_body().text_color(rgb(paint(TEXT_SECONDARY)))
                             }
                         })
                         .child(summary),
@@ -7348,14 +7355,14 @@ impl AppWindow {
                     .mt_6()
                     .pt_5()
                     .border_t_1()
-                    .border_color(rgb(LINE))
+                    .border_color(rgb(paint(LINE)))
                     .child(section_label("Raw event"))
                     .child(
                         div()
                             .pt_2()
                             .text_footnote()
                             .text_monospace()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(raw),
                     ),
             )
@@ -7418,8 +7425,740 @@ impl TranscriptionPickerDelegate for AppWindow {
     }
 }
 
+impl AppWindow {
+    /// The running app shows only Talk and Talk to AI. Preview fixtures keep
+    /// the previous panes so their layout tests still render. `HEX_SIMPLIFIED_UI`
+    /// forces this home inside a preview, which is how the after screenshot is taken.
+    fn uses_simplified_home(&self) -> bool {
+        if std::env::var_os("HEX_SIMPLIFIED_UI").is_some() {
+            return true;
+        }
+        !self.preview
+    }
+
+    /// Downloads Parakeet English when it is not on disk yet. The first-run
+    /// tour starts the same download; this covers a later launch whose saved
+    /// model was pinned away from an already installed checkpoint. The poll
+    /// calls this. Render does not.
+    fn ensure_parakeet(&mut self) {
+        if self.preview || self.parakeet_checked || self.setup_visible {
+            return;
+        }
+        self.parakeet_checked = true;
+        let selection = crate::transcription_models::parakeet_english();
+        let model = definition(selection.model);
+        if crate::transcription_models::is_installed(model, &selection.language) {
+            return;
+        }
+        if !self.platform_prepare_transcription(&selection) {
+            self.transcription_preparation.start(selection, false);
+        }
+    }
+
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn listener_running(&self) -> bool {
+        self.platform_listener()
+            .is_some_and(|listener| listener.running)
+    }
+
+    /// Talk starts or finishes a capture. The click does not synthesize a key.
+    fn activate_talk(&mut self, cx: &mut Context<Self>) {
+        if self.preview {
+            cx.notify();
+            return;
+        }
+        self.platform_toggle_capture(false);
+        self.ensure_parakeet();
+        cx.notify();
+    }
+
+    fn poll_instructions(&mut self) -> bool {
+        let revision = crate::output_instructions::revision();
+        if revision == self.instruction_revision {
+            return false;
+        }
+        self.instruction_revision = revision;
+        let _ = crate::output_instructions::take_selection_notice();
+        if let Some(event) = crate::output_instructions::last_event() {
+            self.home_notice = if event == crate::output_instructions::InstructionEvent::CloudNotice
+            {
+                String::new()
+            } else {
+                tr(event.label()).to_string()
+            };
+        }
+        true
+    }
+
+    /// Talk to AI starts or finishes a capture. The first send waits on the
+    /// cloud notice, which is already on screen.
+    fn activate_talk_to_ai(&mut self, cx: &mut Context<Self>) {
+        if self.preview {
+            cx.notify();
+            return;
+        }
+        if crate::output_instructions::cloud_notice_outstanding() {
+            cx.notify();
+            return;
+        }
+        self.platform_toggle_capture(true);
+        self.ensure_parakeet();
+        cx.notify();
+    }
+
+    fn render_simplified_home(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        crate::llm_backend::warm_slot();
+        let stage = home_stage();
+        let notice = self.home_notice.clone();
+        let active = if stage == "chips" {
+            vec![
+                crate::output_instructions::ActiveInstruction {
+                    scope: crate::output_instructions::InstructionScope::Session,
+                    text: "Formal".into(),
+                },
+                crate::output_instructions::ActiveInstruction {
+                    scope: crate::output_instructions::InstructionScope::Persistent,
+                    text: "Spanish".into(),
+                },
+            ]
+        } else {
+            crate::output_instructions::active()
+        };
+        let preparation = self.transcription_status.clone();
+        let parakeet = crate::transcription_models::parakeet_english().model;
+        let downloading = preparation.model == Some(parakeet) && preparation.error.is_none();
+        let fraction =
+            (preparation.downloaded_bytes as f32 / PARAKEET_DOWNLOAD_BYTES).clamp(0.0, 1.0);
+        let capture = crate::home_capture::active();
+        let listening_talk =
+            stage == "listening" || matches!(capture, Some(crate::home_capture::HomeRequest::Talk));
+        let listening_ai = stage == "listening-ai"
+            || matches!(capture, Some(crate::home_capture::HomeRequest::TalkToAi));
+        let thinking = stage == "thinking" || crate::llm_backend::is_thinking();
+        let listening = listening_talk || listening_ai;
+        let mood = if thinking {
+            OrbMood::Thinking
+        } else if listening {
+            OrbMood::Listening
+        } else {
+            OrbMood::Idle
+        };
+        let level = if stage == "listening" || stage == "listening-ai" {
+            0.62
+        } else {
+            crate::home_capture::level()
+        };
+        let talk_emphasis = window.spring_when("talk-card", listening_talk, SPRING_QUICK);
+        let ai_emphasis = window.spring_when("ai-card", listening_ai, SPRING_QUICK);
+        let talk_fill = if listening_talk || talk_emphasis > 0.01 {
+            CardFill::Talk
+        } else {
+            CardFill::Rest
+        };
+        let ai_fill = if listening_ai || ai_emphasis > 0.01 {
+            CardFill::Ai
+        } else {
+            CardFill::Rest
+        };
+        let talk_hint = if listening_talk {
+            home_hint_line(tr("Click again to finish."))
+        } else {
+            home_keycaps(&self.settings.dictation_hotkey)
+        };
+        let ai_hint = if listening_ai {
+            home_hint_line(tr("Click again to finish."))
+        } else {
+            home_keycaps(&self.settings.edit_hotkey)
+        };
+        let ai_subtitle = if thinking {
+            tr("Thinking…")
+        } else {
+            tr("Sent to our AI service")
+        };
+        let outstanding = crate::output_instructions::cloud_notice_outstanding();
+        let show_cloud =
+            stage == "notice" || (stage == "live" && outstanding && !listening && !thinking);
+        let show_try = active.is_empty() && !show_cloud && !listening && !thinking;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(paint(CANVAS)))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(HOME_WINDOW_WIDTH))
+                    .px_4()
+                    .pt_4()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().when(!crate::llm_backend::api_key_present(), |row| {
+                        row.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .debug_selector(|| "ai-not-configured".into())
+                                .child(status_dot(paint(ACCENT)))
+                                .child(
+                                    div()
+                                        .text_caption()
+                                        .text_color(rgb(paint(TEXT_SECONDARY)))
+                                        .child(tr("Set up AI")),
+                                ),
+                        )
+                    }))
+                    .child(div().flex_1())
+                    .child(
+                        icon_button(ButtonKind::Ghost, Icon::Settings)
+                            .id("home-settings")
+                            .debug_selector(|| "home-settings".into())
+                            .ml_auto()
+                            .on_click(cx.listener(|this, _, _, cx| this.show_settings(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w(px(HOME_WINDOW_WIDTH))
+                    .px_4()
+                    .pb_4()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .when(show_cloud, |column| {
+                        column.overflow_hidden().justify_start().gap_2().pt_2()
+                    })
+                    .when(!show_cloud, |column| column.justify_center().gap_3())
+                    .child(if show_cloud {
+                        voice_orb_compact(mood, level)
+                    } else {
+                        voice_orb(mood, level)
+                    })
+                    .child(div().text_display().child("Said.ai"))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .gap_3()
+                            .child(home_card(
+                                talk_fill,
+                                talk_emphasis,
+                                false,
+                                false,
+                                false,
+                                tr("Talk"),
+                                tr("Stays on this computer"),
+                                talk_hint,
+                                "talk",
+                                "talk-button",
+                                cx.listener(|this, _, _, cx| this.activate_talk(cx)),
+                            ))
+                            .child(home_card(
+                                ai_fill,
+                                ai_emphasis,
+                                true,
+                                thinking,
+                                show_try,
+                                tr("Talk to AI"),
+                                ai_subtitle,
+                                ai_hint,
+                                "talk-to-ai",
+                                "talk-to-ai-button",
+                                cx.listener(|this, _, _, cx| this.activate_talk_to_ai(cx)),
+                            )),
+                    )
+                    .when(!active.is_empty(), |column| {
+                        column.child(render_active_instructions(&active, stage != "chips", cx))
+                    })
+                    .when(downloading, |column| {
+                        column.child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .debug_selector(|| "parakeet-download".into())
+                                .child(
+                                    div()
+                                        .text_caption()
+                                        .text_color(rgb(paint(TEXT_TERTIARY)))
+                                        .text_center()
+                                        .child(tr("Downloading the speech model")),
+                                )
+                                .child(progress_track(div().w(gpui::relative(fraction)))),
+                        )
+                    })
+                    .when_some(preparation.error.clone(), |column, error| {
+                        column.child(div().w_full().child(error_panel(
+                            tr("Could not download the speech model"),
+                            error,
+                        )))
+                    })
+                    .when(show_cloud, |column| {
+                        column.child(
+                            panel()
+                                .p_4()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .shadow_lg()
+                                .child(
+                                    div()
+                                        .text_body()
+                                        .text_color(rgb(paint(TEXT_SECONDARY)))
+                                        .child(tr(
+                                            "Talk to AI sends what you say, and any selected text, to our AI service.",
+                                        )),
+                                )
+                                .child(
+                                    large_button(ButtonKind::Primary, tr("Continue"))
+                                        .id("cloud-notice-continue")
+                                        .w_full()
+                                        .justify_center()
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            crate::output_instructions::acknowledge_cloud_notice();
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    })
+                    .when(!notice.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .text_footnote()
+                                .text_color(rgb(paint(TEXT_SECONDARY)))
+                                .text_center()
+                                .debug_selector(|| "home-notice".into())
+                                .child(notice),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn close_settings_sheet(&mut self, cx: &mut Context<Self>) {
+        self.settings_sheet = false;
+        self.microphone_picker_open = false;
+        self.cancel_hotkey_capture(cx);
+    }
+
+    fn render_settings_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let microphone_label = self
+            .settings
+            .microphone
+            .clone()
+            .unwrap_or_else(|| tr("Automatic").into());
+        let microphone_picker_progress = window.spring_when(
+            "microphone-picker-progress",
+            self.microphone_picker_open,
+            SPRING_SNAP,
+        );
+        let microphone_picker = (self.microphone_picker_open
+            || (!cfg!(test) && microphone_picker_progress > 0.01))
+            .then(|| self.render_microphone_picker(microphone_picker_progress, cx));
+        let talk_hotkey = self.render_hotkey_setting_control(HotkeyKind::Dictation, window, cx);
+        let ai_hotkey = self.render_hotkey_setting_control(HotkeyKind::Edit, window, cx);
+        let permissions = self.platform_settings_notice(cx);
+        let launch_at_login_position = self.launch_at_login_toggle.render_position(window);
+        let launch_at_login_control = if self.launch_at_login_status.is_none() {
+            div()
+                .text_footnote()
+                .text_color(rgb(paint(TEXT_TERTIARY)))
+                .child(if self.login_item_worker.is_some() {
+                    tr("Checking…")
+                } else {
+                    tr("Unavailable")
+                })
+                .into_any_element()
+        } else if self.launch_at_login_status == Some(LoginItemStatus::RequiresApproval) {
+            button(ButtonKind::Secondary, tr("Open settings"))
+                .id("sheet-launch-at-login-approval")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.request_login_item(LoginItemRequest::OpenSettings);
+                    cx.notify();
+                }))
+                .into_any_element()
+        } else {
+            toggle(launch_at_login_position).into_any_element()
+        };
+        let updates = platform::CAPABILITIES
+            .software_updates
+            .then(|| self.render_software_update_control(cx))
+            .flatten()
+            .unwrap_or_else(|| {
+                div()
+                    .text_footnote()
+                    .text_color(rgb(paint(TEXT_TERTIARY)))
+                    .child(tr("Off"))
+                    .into_any_element()
+            });
+        div()
+            .id("settings-sheet-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(paint(SCRIM)))
+            .on_click(cx.listener(|this, _, _, cx| this.close_settings_sheet(cx)))
+            .child(
+                div()
+                    .id("settings-sheet")
+                    .debug_selector(|| "settings-sheet".into())
+                    .w(px(SETTINGS_SHEET))
+                    .max_h(px(SETTINGS_SHEET_MAX_HEIGHT))
+                    .flex()
+                    .flex_col()
+                    .rounded(RADIUS_MODAL)
+                    .border_1()
+                    .border_color(rgb(paint(LINE)))
+                    .bg(rgb(paint(CANVAS)))
+                    .overflow_hidden()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .px_5()
+                            .py_4()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(div().text_title().child(tr("Settings")))
+                            .child(
+                                button(ButtonKind::Secondary, tr("Done"))
+                                    .id("settings-sheet-done")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_settings_sheet(cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("settings-sheet-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .pb_4()
+                            .children(permissions)
+                            .child(settings_section_label(tr("Dictation")))
+                            .child(
+                                panel()
+                                    .child(settings_row(
+                                        tr("Microphone"),
+                                        tr("Input device for dictation and commands"),
+                                        div()
+                                            .relative()
+                                            .flex_none()
+                                            .child(
+                                                disclosure_button(microphone_label)
+                                                    .id("sheet-microphone")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.toggle_microphone_picker(cx);
+                                                    })),
+                                            )
+                                            .children(microphone_picker.map(deferred)),
+                                    ))
+                                    .child(settings_row(
+                                        tr("Dictation shortcut"),
+                                        tr("Click to record a new shortcut"),
+                                        talk_hotkey,
+                                    ))
+                                    .child(
+                                        settings_row(
+                                            tr("Talk to AI shortcut"),
+                                            tr("Click to record a new shortcut"),
+                                            ai_hotkey,
+                                        )
+                                        .border_b_0(),
+                                    ),
+                            )
+                            .child(settings_section_label(tr("Application")))
+                            .child(
+                                panel()
+                                    .when(platform::CAPABILITIES.launch_at_login, |panel| {
+                                        panel.child(
+                                            settings_row(
+                                                tr("Launch at login"),
+                                                tr("Start Said.ai when you log in"),
+                                                launch_at_login_control,
+                                            )
+                                            .id("sheet-launch-at-login")
+                                            .when(
+                                                matches!(
+                                                    self.launch_at_login_status,
+                                                    Some(
+                                                        LoginItemStatus::Enabled
+                                                            | LoginItemStatus::Disabled
+                                                    )
+                                                ) && (self.preview
+                                                    || self.login_item_worker.is_some()),
+                                                |row| {
+                                                    row.on_click(cx.listener(|this, _, _, cx| {
+                                                        let enabled =
+                                                            !this.launch_at_login_toggle.enabled();
+                                                        this.set_launch_at_login(enabled, cx);
+                                                    }))
+                                                },
+                                            ),
+                                        )
+                                    })
+                                    .child(
+                                        settings_row(
+                                            tr("Updates"),
+                                            tr("Automatic updates are off"),
+                                            updates,
+                                        )
+                                        .border_b_0(),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+fn home_stage() -> &'static str {
+    // Screenshot staging stays out of release builds. An unset variable follows
+    // the live window, including the cloud notice.
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(stage) = std::env::var("HEX_HOME_STAGE") {
+            return match stage.as_str() {
+                "listening" => "listening",
+                "listening-ai" => "listening-ai",
+                "thinking" => "thinking",
+                "chips" => "chips",
+                "notice" => "notice",
+                "idle" => "idle",
+                _ => "live",
+            };
+        }
+    }
+    "live"
+}
+
+fn home_hint_line(text: &str) -> AnyElement {
+    div()
+        .text_caption()
+        .text_color(rgb(paint(TEXT_TERTIARY)))
+        .text_center()
+        .child(text.to_string())
+        .into_any_element()
+}
+
+fn home_keycaps(binding: &crate::app_settings::HotkeyBinding) -> AnyElement {
+    let parts = binding.keycaps();
+    if parts.is_empty() {
+        home_hint_line(tr("the shortcut"))
+    } else {
+        compact_keycaps(parts)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn home_card(
+    fill: CardFill,
+    emphasis: f32,
+    sparkle: bool,
+    shimmer: bool,
+    try_hint: bool,
+    title: impl IntoElement,
+    subtitle: impl IntoElement,
+    hint: AnyElement,
+    id: &'static str,
+    selector: &'static str,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let live = emphasis >= 0.45;
+    let icon_color = match fill {
+        CardFill::Talk if live => paint(ON_ACCENT),
+        CardFill::Ai if live => paint(ACCENT),
+        _ => paint(TEXT_SECONDARY),
+    };
+    let subtitle_color = match fill {
+        CardFill::Talk if live => paint(ON_ACCENT),
+        _ if shimmer => paint(TEXT_SECONDARY),
+        _ => paint(TEXT_TERTIARY),
+    };
+    let glyph = if sparkle {
+        home_sparkle_icon(icon_color)
+    } else {
+        home_mic_icon(icon_color)
+    };
+    let card = action_card(fill, emphasis)
+        .id(id)
+        .debug_selector(move || selector.into())
+        .active(move |card| {
+            card.bg(if fill == CardFill::Talk && live {
+                mix_color(rgb(paint(ACCENT)), rgb(paint(ACCENT_TEXT)), 0.22)
+            } else {
+                rgb(paint(SURFACE_HOVER))
+            })
+        })
+        .on_click(on_click)
+        .child(glyph)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_headline().child(title))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(rgb(subtitle_color))
+                        .child(subtitle),
+                ),
+        );
+    let card = if shimmer && !crate::motion::reduced_motion() {
+        card.with_animation(
+            "ai-thinking-shimmer",
+            Animation::new(Duration::from_millis(900))
+                .repeat()
+                .with_easing(ease_in_out),
+            |card, phase| {
+                let wave = if phase < 0.5 {
+                    phase * 2.0
+                } else {
+                    (1.0 - phase) * 2.0
+                };
+                // A pulsing accent edge. Fading the whole card reads as disabled.
+                card.w_full()
+                    .border_color(mix_color(
+                        rgb(paint(LINE)),
+                        rgb(paint(ACCENT)),
+                        0.35 + (0.65 * wave),
+                    ))
+                    .bg(mix_color(
+                        rgb(paint(SURFACE)),
+                        rgb(paint(ACCENT_SURFACE)),
+                        0.35 + (0.45 * wave),
+                    ))
+            },
+        )
+        .into_any_element()
+    } else {
+        card.w_full().into_any_element()
+    };
+    div()
+        .flex_1()
+        .min_w(px(0.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_2()
+        .child(div().w_full().child(card))
+        .child(div().w_full().flex().justify_center().child(hint))
+        .when(try_hint, |column| {
+            column.child(
+                div()
+                    .w_full()
+                    .text_caption()
+                    .text_color(rgb(paint(TEXT_TERTIARY)))
+                    .text_center()
+                    .child(tr("Try: \"for now, write formally\"")),
+            )
+        })
+}
+
+fn render_active_instructions(
+    active: &[crate::output_instructions::ActiveInstruction],
+    dismissable: bool,
+    cx: &mut Context<AppWindow>,
+) -> gpui::Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_wrap()
+        .justify_center()
+        .gap_2()
+        .debug_selector(|| "active-instructions".into())
+        .children(active.iter().enumerate().map(|(index, item)| {
+            let scope = item.scope;
+            let text = item.text.clone();
+            let when = match scope {
+                crate::output_instructions::InstructionScope::Session => tr("for now"),
+                crate::output_instructions::InstructionScope::Persistent => tr("always"),
+            };
+            let motion_id = SharedString::from(format!("chip-enter-{text}"));
+            let chip = instruction_chip(format!("{text} · {when}")).child(
+                icon_button(ButtonKind::Ghost, Icon::Close)
+                    .id(SharedString::from(format!("instruction-chip-{index}")))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        if dismissable {
+                            crate::output_instructions::dismiss(scope, &text);
+                        }
+                        cx.notify();
+                    })),
+            );
+            if crate::motion::reduced_motion() {
+                chip.into_any_element()
+            } else {
+                chip.with_animation(
+                    motion_id,
+                    Animation::new(Duration::from_millis(150)).with_easing(ease_in_out),
+                    |chip, delta| chip.opacity(delta),
+                )
+                .into_any_element()
+            }
+        }))
+}
+
 impl Render for AppWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        follow_window(window);
+        if self.uses_simplified_home() {
+            let _frame_guard = crate::motion::begin_frame("Said.ai");
+            let setup = self.setup_visible.then(|| self.render_tour(window, cx));
+            let sheet = self
+                .settings_sheet
+                .then(|| self.render_settings_sheet(window, cx));
+            let main_content = self.render_simplified_home(window, cx);
+            return platform::frame(window_frame())
+                .track_focus(&self.window_focus)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key != "escape" || !this.settings_sheet {
+                        return;
+                    }
+                    this.close_settings_sheet(cx);
+                    cx.stop_propagation();
+                }))
+                .on_action(|_: &CloseWindow, window, _| window.remove_window())
+                .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
+                .on_action(|_: &ToggleFullscreen, window, _| window.toggle_fullscreen())
+                .on_action(cx.listener(|this, _: &ShowSettings, window, cx| {
+                    this.show_settings(cx);
+                    window.activate_window();
+                }))
+                .child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .children(platform::caption(window))
+                        .child(div().flex_1().min_h_0().child(main_content)),
+                )
+                .children(sheet)
+                .children(setup)
+                .into_any_element();
+        }
+        self.render_classic_shell(window, cx)
+    }
+}
+
+impl AppWindow {
+    /// The previous sidebar shell. Preview fixtures still draw it so layout
+    /// tests keep covering those panes. The running app does not.
+    fn render_classic_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let _frame_guard = crate::motion::begin_frame(self.pane.label());
         crate::motion::pane_switch_rendered(self.pane.label(), window);
         let model_notice = self.render_model_notice(cx);
@@ -7525,6 +8264,7 @@ impl Render for AppWindow {
             .children(setup)
             .children(transcription_picker)
             .children(mode_context_menu)
+            .into_any_element()
     }
 }
 
@@ -7603,7 +8343,7 @@ fn preview_history() -> Option<History> {
 
 fn voice_action_description(enabled: bool) -> &'static str {
     if enabled {
-        tr("Use the shortcut below with OpenCode to run spoken instructions")
+        tr("Hold the shortcut and say how text should come out.")
     } else {
         tr("Off by default. Its saved shortcut is not reserved until you enable Voice Action.")
     }
@@ -7868,7 +8608,7 @@ fn mode_activation_icons(
                 .items_center()
                 .justify_center()
                 .rounded(icon_radius(ACTIVATION_ICON_SIZE))
-                .bg(rgb(SURFACE_SELECTED))
+                .bg(rgb(paint(SURFACE_SELECTED)))
                 .child(icon(Icon::Globe, TEXT_SECONDARY))
                 .into_any_element(),
         );
@@ -7907,7 +8647,7 @@ fn application_icon(
         .items_center()
         .justify_center()
         .rounded(icon_radius(size))
-        .bg(rgb(SURFACE_SELECTED))
+        .bg(rgb(paint(SURFACE_SELECTED)))
         .map(|monogram| {
             if size >= CONTROL_HEIGHT {
                 monogram.text_body()
@@ -7916,7 +8656,7 @@ fn application_icon(
             }
         })
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(TEXT_SECONDARY))
+        .text_color(rgb(paint(TEXT_SECONDARY)))
         .child(initial)
         .into_any_element()
 }
@@ -8026,9 +8766,6 @@ fn model_id(key: &str) -> &str {
 }
 
 fn provider_label(provider: &str) -> String {
-    if provider.eq_ignore_ascii_case("opencode") {
-        return "OpenCode".into();
-    }
     provider
         .split(['-', '_'])
         .filter(|part| !part.is_empty())
@@ -8053,7 +8790,7 @@ fn model_choice_row(
             div()
                 .flex_none()
                 .text_caption()
-                .text_color(rgb(TEXT_TERTIARY))
+                .text_color(rgb(paint(TEXT_TERTIARY)))
                 .child(subtitle.into()),
         )
 }
@@ -8079,7 +8816,7 @@ fn settings_control(
                 .child(
                     div()
                         .text_caption()
-                        .text_color(rgb(TEXT_TERTIARY))
+                        .text_color(rgb(paint(TEXT_TERTIARY)))
                         .child(description.into()),
                 ),
         )
@@ -8092,7 +8829,7 @@ fn field_label(label: &'static str) -> Div {
     div()
         .text_footnote()
         .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(TEXT_SECONDARY))
+        .text_color(rgb(paint(TEXT_SECONDARY)))
         .child(label)
 }
 
@@ -8248,13 +8985,13 @@ fn activity_context(reader: &EventReader) -> (Option<String>, Option<String>) {
 
 fn event_summary(event: &VoiceEvent) -> String {
     match event {
-        VoiceEvent::SessionStarted { .. } => "Hex session started".into(),
+        VoiceEvent::SessionStarted { .. } => "Said.ai session started".into(),
         VoiceEvent::State { state, device, .. } => match state {
             VoiceState::Sleeping => "Voice commands went to sleep".into(),
             VoiceState::Listening => format!("Voice commands resumed on {device}"),
             VoiceState::Dictating => format!("Dictation started on {device}"),
             VoiceState::Transcribing => "Dictation is being transcribed".into(),
-            VoiceState::Stopping => "Hex is stopping".into(),
+            VoiceState::Stopping => "Said.ai is stopping".into(),
         },
         VoiceEvent::Transcript {
             phase,
@@ -8275,7 +9012,7 @@ fn event_summary(event: &VoiceEvent) -> String {
             let command = command.as_deref().unwrap_or("an unmatched command");
             match outcome {
                 CommandOutcome::Ignored => format!("Ignored \"{heard}\""),
-                CommandOutcome::Woke => format!("\"{heard}\" woke Hex"),
+                CommandOutcome::Woke => format!("\"{heard}\" woke Said.ai"),
                 CommandOutcome::Slept => format!("\"{heard}\" put voice commands to sleep"),
                 CommandOutcome::Submitted => format!("Sent {command} for \"{heard}\""),
                 CommandOutcome::Executed => format!("Ran {command} for \"{heard}\""),
@@ -8935,7 +9672,7 @@ mod tests {
                                 )))
                                 .child(settings_copy(
                                     "Release the microphone when idle?",
-                                    "Hex will open the microphone when you press the shortcut. This adds a start-up delay and removes pre-roll, so the beginning of speech may be missed if you speak right away.",
+                                    "Said.ai will open the microphone when you press the shortcut. This adds a start-up delay and removes pre-roll, so the beginning of speech may be missed if you speak right away.",
                                 )),
                         )),
                     )
@@ -9213,7 +9950,8 @@ mod tests {
         assert!(description.contains("not reserved"));
 
         let description = voice_action_description(true);
-        assert!(description.contains("OpenCode"));
+        assert!(description.contains("Hold the shortcut"));
+        assert!(!description.contains("OpenCode"));
         assert!(!description.contains("not reserved"));
     }
 
@@ -9390,45 +10128,26 @@ mod tests {
     }
 
     #[test]
-    fn production_navigation_keeps_commands_available_as_an_opt_in() {
+    fn production_navigation_omits_history_commands_and_modes() {
         assert_eq!(
             Pane::all(platform::CAPABILITIES, false, false),
-            vec![
-                Pane::Settings,
-                Pane::Modes,
-                Pane::Commands,
-                Pane::VoiceAction,
-                Pane::History,
-            ]
+            vec![Pane::Settings]
         );
         assert_eq!(
             Pane::all(platform::CAPABILITIES, false, true),
-            vec![
-                Pane::Settings,
-                Pane::Modes,
-                Pane::Commands,
-                Pane::VoiceAction,
-                Pane::History,
-                Pane::Meetings,
-            ],
+            vec![Pane::Settings, Pane::Meetings],
             "the meetings opt-in adds only the Meetings pane"
         );
+        assert!(!Pane::all(platform::CAPABILITIES, false, true).contains(&Pane::History));
+        assert!(!Pane::all(platform::CAPABILITIES, false, true).contains(&Pane::Commands));
+        assert!(!Pane::all(platform::CAPABILITIES, false, true).contains(&Pane::Modes));
     }
 
     #[test]
     fn developer_navigation_appends_developer_panes_in_order() {
         assert_eq!(
             Pane::all(platform::CAPABILITIES, true, false),
-            vec![
-                Pane::Settings,
-                Pane::Modes,
-                Pane::Commands,
-                Pane::VoiceAction,
-                Pane::History,
-                Pane::HudLab,
-                Pane::Meetings,
-                Pane::Activity,
-            ]
+            vec![Pane::Settings, Pane::HudLab, Pane::Meetings, Pane::Activity,]
         );
     }
 
@@ -9439,14 +10158,7 @@ mod tests {
         );
         assert_eq!(
             Pane::all_with_fun(platform::CAPABILITIES, false, false, true),
-            vec![
-                Pane::Settings,
-                Pane::Modes,
-                Pane::Commands,
-                Pane::VoiceAction,
-                Pane::History,
-                Pane::Fun,
-            ]
+            vec![Pane::Settings, Pane::Fun]
         );
     }
 
@@ -9599,7 +10311,7 @@ mod tests {
 
         let selected = model_presentation(&catalog, Some("opencode/example-rewrite")).unwrap();
         assert_eq!(selected.name, "Example Rewrite");
-        assert_eq!(selected.provider, "OpenCode");
+        assert_eq!(selected.provider, "Opencode");
         assert_eq!(selected.key, "opencode/example-rewrite");
         assert!(!selected.is_default);
 
@@ -9635,10 +10347,10 @@ mod tests {
 
         let copy = opencode_unavailable_copy(&state, OpenCodeFeature::VoiceAction).unwrap();
 
-        assert_eq!(copy.title, "OpenCode is unavailable");
+        assert_eq!(copy.title, "The model catalog is unavailable");
         assert_eq!(
             copy.description,
-            "Hex could not load the OpenCode model catalog."
+            "Said.ai could not load the model catalog."
         );
         assert_eq!(
             copy.error.as_deref(),
@@ -9654,7 +10366,7 @@ mod tests {
             opencode_unavailable_copy(&ModelCatalogState::Missing, OpenCodeFeature::VoiceAction)
                 .unwrap();
 
-        assert_eq!(copy.title, "Voice Action requires OpenCode");
+        assert_eq!(copy.title, "Voice Action is unavailable");
         assert_eq!(copy.error, None);
         assert!(copy.can_retry);
         assert!(copy.can_open_setup);
@@ -9665,10 +10377,10 @@ mod tests {
         let loading =
             opencode_unavailable_copy(&ModelCatalogState::Loading, OpenCodeFeature::Transformation)
                 .unwrap();
-        assert_eq!(loading.title, "Checking for OpenCode");
+        assert_eq!(loading.title, "Checking…");
         assert_eq!(
             loading.description,
-            "OpenCode transformation will be available after Hex connects to OpenCode."
+            "Transformation will be available after Said.ai connects."
         );
         assert!(!loading.can_retry);
         assert!(!loading.can_open_setup);
@@ -9676,10 +10388,10 @@ mod tests {
         let missing =
             opencode_unavailable_copy(&ModelCatalogState::Missing, OpenCodeFeature::Transformation)
                 .unwrap();
-        assert_eq!(missing.title, "Transformation requires OpenCode");
+        assert_eq!(missing.title, "Transformation is unavailable");
         assert_eq!(
             missing.description,
-            "Install and configure OpenCode to transform dictated text."
+            "Transform dictated text after Said.ai connects."
         );
         assert_eq!(missing.error, None);
         assert!(missing.can_retry);
@@ -9688,7 +10400,7 @@ mod tests {
 
         let failed = ModelCatalogState::Failed("catalog failure".into());
         let error = opencode_unavailable_copy(&failed, OpenCodeFeature::Transformation).unwrap();
-        assert_eq!(error.title, "OpenCode is unavailable");
+        assert_eq!(error.title, "The model catalog is unavailable");
         assert_eq!(error.error.as_deref(), Some("catalog failure"));
         assert!(error.can_retry);
         assert!(!error.can_open_setup);

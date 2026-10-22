@@ -11,7 +11,7 @@ sparkle_dir=$("$root/scripts/setup-sparkle.sh")
 version=$(hex_version "$root")
 build_number=$(hex_build_number "$version")
 bundle_name=Hex.app
-bundle_id=com.kitlangton.hex2
+bundle_id=com.saidyaka.said
 executable_name=hex
 
 bundle="$root/target/app/$bundle_name"

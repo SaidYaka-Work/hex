@@ -892,13 +892,14 @@ impl Default for AppSettings {
     }
 }
 
-/// A new install starts with the model recommended for the person's
-/// language, so first-run setup can download it without asking.
+/// A new install always starts with Parakeet English, so first-run setup
+/// downloads that model without asking which one.
 fn default_transcription() -> TranscriptionSelection {
-    crate::transcription_models::recommended_selection(&crate::desktop_i18n::preferred_language())
+    crate::transcription_models::parakeet_english()
 }
 
 impl AppSettings {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn transcription_for_model(&self, id: TranscriptionModelId) -> TranscriptionSelection {
         if self.transcription.model == id {
             return self.transcription.clone();
@@ -1052,8 +1053,9 @@ impl AppSettings {
                 settings.migrate_disabled_transcription_model();
                 settings.apply_one_time_migrations();
                 settings.normalize_transcription_recents();
+                settings.pin_parakeet_english();
+                settings.force_said_ai_defaults();
                 crate::transcription_models::validate(&settings.transcription)?;
-                settings.repair_hotkey_conflict();
                 if serde_json::to_value(&settings)? != loaded
                     && let Err(error) = settings.write_to(path)
                 {
@@ -1226,6 +1228,33 @@ impl AppSettings {
         self.migrations.iter().any(|applied| applied == id)
     }
 
+    /// Dictation is Parakeet Unified English. Saved choices are rewritten on
+    /// load so a fresh install and an upgraded settings file download and run
+    /// the same model.
+    fn pin_parakeet_english(&mut self) {
+        self.transcription = crate::transcription_models::parakeet_english();
+    }
+
+    /// Said.ai has no History, Voice Commands, or mode rewrites. Existing
+    /// files are forced off on load. Saved mode text stays on disk and is
+    /// not applied.
+    fn force_said_ai_defaults(&mut self) {
+        self.history_retention = crate::history::HistoryRetention::Off;
+        self.commands_enabled = false;
+        self.dictation_processing
+            .default_mode
+            .post_processing
+            .enabled = false;
+        self.dictation_processing
+            .default_mode
+            .transformations
+            .clear();
+        for mode in &mut self.dictation_processing.modes {
+            mode.post_processing.enabled = false;
+            mode.transformations.clear();
+        }
+    }
+
     /// English dictation moves to Parakeet Unified English, which streams
     /// while the shortcut is held. The previous model stays downloaded and
     /// in the recent models, one click away. Other languages and Auto keep
@@ -1276,56 +1305,19 @@ impl AppSettings {
         self.transcription = TranscriptionSelection::default();
     }
 
+    /// Saved chords are not rewritten. When Talk overlaps Talk to AI, the
+    /// saved Talk to AI chord stays in settings and is not captured.
     pub fn runtime_hotkeys(&self) -> RuntimeHotkeys {
+        let edit = (!self.dictation_hotkey.overlaps(&self.edit_hotkey))
+            .then(|| self.edit_hotkey.runtime());
         RuntimeHotkeys {
             dictation: self.dictation_hotkey.runtime(),
-            edit: self
-                .voice_action
-                .enabled
-                .then(|| self.edit_hotkey.runtime()),
+            edit,
             paste_last: self.paste_last_hotkey.as_ref().map(HotkeyBinding::runtime),
             paste_meeting: self
                 .meetings
                 .available()
                 .then(|| HotkeyBinding::paste_meeting_default().runtime()),
-        }
-    }
-
-    fn repair_hotkey_conflict(&mut self) {
-        if !self.voice_action.enabled || !self.dictation_hotkey.overlaps(&self.edit_hotkey) {
-            return;
-        }
-        #[cfg(target_os = "macos")]
-        let edit_with_key = crate::keyboard::key_code_for('e')
-            .ok()
-            .map(|code| HotkeyBinding {
-                modifiers: HotkeyModifiers::option_command(),
-                key: Some(HotkeyKey {
-                    code,
-                    label: "E".into(),
-                }),
-            });
-        #[cfg(not(target_os = "macos"))]
-        let edit_with_key = Some(HotkeyBinding::chord(HotkeyModifiers::option_command(), "e"));
-        let control_command = HotkeyBinding {
-            modifiers: HotkeyModifiers {
-                control: Some(ModifierSide::Either),
-                command: Some(ModifierSide::Either),
-                ..Default::default()
-            },
-            key: None,
-        };
-        if let Some(binding) = [
-            Some(HotkeyBinding::edit_default()),
-            edit_with_key,
-            Some(control_command),
-        ]
-        .into_iter()
-        .flatten()
-        .find(|binding| !self.dictation_hotkey.overlaps(binding))
-        {
-            tracing::warn!("replaced a conflicting Voice Action shortcut");
-            self.edit_hotkey = binding;
         }
     }
 }
@@ -1535,6 +1527,7 @@ pub fn edit_hotkey() -> Option<RuntimeHotkey> {
     runtime_hotkeys().edit
 }
 
+#[allow(dead_code)]
 pub fn voice_action_settings() -> VoiceActionSettings {
     VOICE_ACTION_SETTINGS
         .get_or_init(Default::default)
@@ -1742,7 +1735,8 @@ mod tests {
             "the previous model stays one click away"
         );
 
-        // Switching back after the migration sticks.
+        // A later load pins Parakeet English again, even if the file was
+        // written with another model.
         let dir = TestSettingsDir::new("streaming-english");
         let mut chosen = settings.clone();
         chosen.transcription.model = TranscriptionModelId::ParakeetV3;
@@ -1750,8 +1744,9 @@ mod tests {
         let reloaded = AppSettings::load_from(&dir.path).unwrap();
         assert_eq!(
             reloaded.transcription.model,
-            TranscriptionModelId::ParakeetV3
+            TranscriptionModelId::ParakeetUnifiedEnglish
         );
+        assert_eq!(reloaded.transcription.language, "en");
     }
 
     #[test]
@@ -1770,7 +1765,7 @@ mod tests {
     }
 
     #[test]
-    fn other_languages_and_auto_keep_their_model() {
+    fn load_pins_every_saved_language_to_parakeet_english() {
         for language in ["de", "auto"] {
             let model = crate::transcription_models::choices_for_runtime(language)
                 .iter()
@@ -1787,8 +1782,10 @@ mod tests {
             )
             .unwrap();
             let settings = AppSettings::load_from(&dir.path).unwrap();
-            assert_eq!(settings.transcription.model, model);
-            assert_eq!(settings.transcription.language, language);
+            assert_eq!(
+                settings.transcription,
+                crate::transcription_models::parakeet_english()
+            );
             assert!(settings.has_migration(STREAMING_ENGLISH_MIGRATION));
         }
     }
@@ -1808,8 +1805,8 @@ mod tests {
         settings.write_to(&dir.path).unwrap();
         let reloaded = AppSettings::load_from(&dir.path).unwrap();
         assert_eq!(
-            reloaded.transcription.model,
-            TranscriptionModelId::ParakeetV3
+            reloaded.transcription,
+            crate::transcription_models::parakeet_english()
         );
     }
 
@@ -2167,13 +2164,17 @@ mod tests {
     }
 
     #[test]
-    fn voice_action_requires_explicit_opt_in_for_new_and_existing_settings() {
+    fn talk_to_ai_shortcut_is_reserved_without_the_old_voice_action_opt_in() {
         for json in [
             r#"{}"#,
             r#"{"voice_action":{"model":"example/model-a","variant":"fast"}}"#,
         ] {
             let settings: AppSettings = serde_json::from_str(json).unwrap();
-            assert!(settings.runtime_hotkeys().edit.is_none());
+            assert!(!settings.voice_action.enabled);
+            assert_eq!(
+                settings.runtime_hotkeys().edit,
+                Some(settings.edit_hotkey.runtime())
+            );
             let saved = serde_json::to_value(settings).unwrap();
             assert_eq!(saved["voice_action"]["enabled"], false);
         }
@@ -2474,27 +2475,23 @@ mod tests {
             ..Default::default()
         };
         settings.voice_action.enabled = true;
-
-        settings.repair_hotkey_conflict();
-
-        assert!(!settings.dictation_hotkey.overlaps(&settings.edit_hotkey));
+        let saved_dictation = settings.dictation_hotkey.clone();
+        let saved_edit = settings.edit_hotkey.clone();
+        assert_eq!(settings.dictation_hotkey, saved_dictation);
+        assert_eq!(settings.edit_hotkey, saved_edit);
+        assert!(settings.runtime_hotkeys().edit.is_none());
     }
 
     #[test]
-    fn disabled_voice_action_preserves_its_binding_without_reserving_it() {
+    fn talk_to_ai_shortcut_is_not_rewritten_when_it_overlaps_dictation() {
         let mut settings = AppSettings {
             dictation_hotkey: HotkeyBinding::edit_default(),
             ..Default::default()
         };
         let saved_binding = settings.edit_hotkey.clone();
-        settings.repair_hotkey_conflict();
         assert_eq!(settings.edit_hotkey, saved_binding);
+        assert!(settings.dictation_hotkey.overlaps(&settings.edit_hotkey));
         assert!(settings.runtime_hotkeys().edit.is_none());
-        settings.voice_action.enabled = true;
-        assert_eq!(
-            settings.runtime_hotkeys().edit,
-            Some(saved_binding.runtime())
-        );
         settings.voice_action.enabled = false;
         assert!(settings.runtime_hotkeys().edit.is_none());
         assert_eq!(settings.edit_hotkey, saved_binding);

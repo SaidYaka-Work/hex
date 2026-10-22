@@ -59,15 +59,13 @@ Or install manually:
 - **Accessibility** lets HEX paste into the foreground app. Drag the HEX tile into the list.
 - **Transcription model** downloads the speech model that runs locally.
 
-HEX checks for signed updates automatically. Use **Hex > Check for Updates…**
-to check immediately.
+Said.ai does not check for updates. The Sparkle feed is unset and automatic
+checks are off, so this build cannot replace itself with Hex.
 
-Organizations that manage app versions themselves can turn off in-app updates,
-including manual checks, with the `DisableUpdates` Boolean in the
-`com.kitlangton.hex2` preference domain. Deploy it in a configuration profile
-(payload type `com.kitlangton.hex2`, key `DisableUpdates`, value `true`), or for a
-single Mac run `defaults write com.kitlangton.hex2 DisableUpdates -bool true`.
-Relaunch HEX to apply it. Model downloads still work.
+The preference domain is `com.saidyaka.said`. A `DisableUpdates` Boolean in
+that domain still marks updates as managed. Deploy it in a configuration
+profile (payload type `com.saidyaka.said`, key `DisableUpdates`, value `true`),
+or for a single Mac run `defaults write com.saidyaka.said DisableUpdates -bool true`.
 
 **Download blocked?** [Alternative download: GitHub — Hex 2.3.1](https://github.com/anomalyco/hex/releases/download/app-v2.3.1/HEX-2.3.1-arm64.dmg)
 contains the identical signed DMG for Apple silicon and macOS 15+. App releases

@@ -337,7 +337,7 @@ impl AudioInput {
     pub fn open_named(name: &str) -> Result<Self> {
         if crate::hex_microphone::is_hex_virtual_device_name(name) {
             return Err(eyre!(
-                "Hex cannot capture from its own virtual microphone: {name}"
+                "Said.ai cannot capture from its own virtual microphone: {name}"
             ));
         }
         let host = cpal::default_host();
