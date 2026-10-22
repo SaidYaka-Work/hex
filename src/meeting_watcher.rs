@@ -238,7 +238,7 @@ fn run_panel_preview(preview: PanelPreview) -> Result<()> {
                     "error": null
                 }))?;
             manifest.export_path = Some(PathBuf::from(
-                "~/Documents/Hex Meetings/2026-10-15 1430 Zoom call — 2-30 PM.md",
+                "~/Documents/Said.ai Meetings/2026-10-15 1430 Zoom call — 2-30 PM.md",
             ));
             manifest.title = meeting::default_title(None, manifest.created_at_ms);
             manifest.notes = Some(meeting::MeetingNotes {
@@ -252,6 +252,7 @@ fn run_panel_preview(preview: PanelPreview) -> Result<()> {
     };
     let (commands, _receiver) = mpsc::sync_channel(8);
     Application::new().run(move |cx| {
+        crate::design_tokens::install_bundled_fonts(cx);
         cx.bind_keys([KeyBinding::new(
             "cmd-q",
             crate::app_window::QuitApplication,
@@ -543,11 +544,12 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
             ),
         };
         if let Err(error) = result {
-            tracing::error!(%error, "could not open Hex");
+            tracing::error!(%error, "could not open Said.ai");
         }
     });
     let application_runtime_workers = runtime_workers.clone();
     application.run(move |cx| {
+        crate::design_tokens::install_bundled_fonts(cx);
         let transcription_preparation = cx.default_global::<TranscriptionPreparation>().clone();
         let close_app_window = app_window.clone();
         cx.bind_keys([
@@ -589,9 +591,9 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
             MenuItem::action("Settings…", crate::app_window::ShowSettings),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide Hex", crate::app_window::HideApplication),
+            MenuItem::action("Hide Said.ai", crate::app_window::HideApplication),
             MenuItem::separator(),
-            MenuItem::action("Quit Hex", crate::app_window::QuitApplication),
+            MenuItem::action("Quit Said.ai", crate::app_window::QuitApplication),
         ]);
         cx.set_menus(vec![
             Menu {
@@ -620,7 +622,7 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
             match crate::status_item::install() {
                 Ok(actions) => Some(actions),
                 Err(error) => {
-                    tracing::error!(%error, "could not install Hex status item");
+                    tracing::error!(%error, "could not install Said.ai status item");
                     None
                 }
             }
@@ -663,7 +665,7 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
             None => None,
         };
         if let Some(Err(error)) = open_result {
-            tracing::error!(%error, "could not open Hex");
+            tracing::error!(%error, "could not open Said.ai");
         }
         let quit_shutdown = shutdown;
         let quit_workers = application_runtime_workers.clone();
@@ -766,28 +768,16 @@ async fn drive_ui(
             .and_then(|actions| actions.try_recv().ok())
         {
             let result = cx.update(|cx| match action {
-                crate::status_item::StatusItemAction::OpenSettings
-                | crate::status_item::StatusItemAction::OpenModels => match ui.open_or_focus(cx) {
+                crate::status_item::StatusItemAction::OpenSettings => match ui.open_or_focus(cx) {
                     Ok(handle) => {
                         let _ = handle.update(cx, |window, _, cx| {
-                            if action == crate::status_item::StatusItemAction::OpenModels {
-                                window.show_transcription_models(cx);
-                            } else {
-                                window.show_settings(cx);
-                            }
+                            window.show_settings(cx);
                         });
                     }
                     Err(error) => {
-                        tracing::error!(%error, "could not open Hex from status item");
+                        tracing::error!(%error, "could not open Said.ai from the status item");
                     }
                 },
-                crate::status_item::StatusItemAction::SelectModel(_) => {
-                    // The menu no longer offers a model. Parakeet English stays selected.
-                }
-                crate::status_item::StatusItemAction::CancelModelPreparation => {
-                    ui.transcription_preparation.cancel();
-                    model_menu_refresh_at = Instant::now();
-                }
                 crate::status_item::StatusItemAction::PasteLast => {
                     let _ = ui
                         .recognition_controls
@@ -826,7 +816,7 @@ async fn drive_ui(
                 }
             });
             if let Err(error) = result {
-                tracing::error!(%error, "could not handle Hex status item action");
+                tracing::error!(%error, "could not handle Said.ai status item action");
                 return;
             }
         }
@@ -997,7 +987,7 @@ async fn drive_ui(
                     meeting_state = MeetingMenuState::Idle;
                     ui.show_meeting_window(
                         offer_window.take(),
-                        "could not open Hex for meeting failure",
+                        "could not open Said.ai for meeting failure",
                         cx,
                         |window, cx| window.meeting_failed(title, error, cx),
                     )
@@ -1950,9 +1940,9 @@ impl MeetingPanel {
                     .gap_2p5()
                     .pl_3p5()
                     .pr_2()
-                    .bg(rgb(CANVAS))
+                    .bg(rgb(paint(CANVAS)))
                     .border_1()
-                    .border_color(rgb(LINE_STRONG))
+                    .border_color(rgb(paint(LINE_STRONG)))
                     .rounded_full()
                     .shadow_sm()
                     .overflow_hidden()
@@ -1960,21 +1950,21 @@ impl MeetingPanel {
                         gpui::MouseButton::Left,
                         cx.listener(|panel, _, _, cx| panel.begin_drag(cx)),
                     )
-                    .child(status_dot(DANGER).size_2().opacity(pulse))
+                    .child(status_dot(paint(DANGER)).size_2().opacity(pulse))
                     .child(
                         div()
                             .flex_none()
                             .text_caption()
                             .text_monospace()
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(TEXT_SECONDARY))
+                            .text_color(rgb(paint(TEXT_SECONDARY)))
                             .child(elapsed),
                     )
                     .child(
                         div().flex_1().min_w_0().child(
                             truncated_line(FOOTNOTE, title)
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(rgb(TEXT_PRIMARY)),
+                                .text_color(rgb(paint(TEXT_PRIMARY))),
                         ),
                     )
                     .when(!expanded && pending_turns > 0, |pill| {
@@ -2055,6 +2045,7 @@ impl MeetingPanel {
 
 impl Render for MeetingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        follow_window(window);
         if matches!(self.kind, PanelKind::Recording(_)) {
             return self.render_recording(window, cx).into_any_element();
         }
@@ -2164,7 +2155,7 @@ impl Render for MeetingPanel {
                 (
                     DANGER,
                     format!("{app} left the call"),
-                    "Hex is still recording.".into(),
+                    "Said.ai is still recording.".into(),
                     div()
                         .flex()
                         .gap_2()
@@ -2277,9 +2268,9 @@ impl Render for MeetingPanel {
                     .gap_3()
                     .pl_4()
                     .pr_2()
-                    .bg(rgb(CANVAS))
+                    .bg(rgb(paint(CANVAS)))
                     .border_1()
-                    .border_color(rgb(LINE_STRONG))
+                    .border_color(rgb(paint(LINE_STRONG)))
                     .rounded_full()
                     .shadow_sm()
                     .overflow_hidden()
@@ -2293,10 +2284,11 @@ impl Render for MeetingPanel {
                             .child(
                                 truncated_line(BODY, title)
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT_PRIMARY)),
+                                    .text_color(rgb(paint(TEXT_PRIMARY))),
                             )
                             .child(
-                                truncated_line(CAPTION, subtitle).text_color(rgb(TEXT_TERTIARY)),
+                                truncated_line(CAPTION, subtitle)
+                                    .text_color(rgb(paint(TEXT_TERTIARY))),
                             ),
                     )
                     .child(actions.flex_none()),

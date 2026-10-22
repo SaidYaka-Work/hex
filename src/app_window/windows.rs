@@ -18,7 +18,6 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     fun: false,
     modes: true,
     voice_action: true,
-    history: true,
     permissions: false,
     dock_icon: false,
     launch_at_login: true,
@@ -131,7 +130,7 @@ pub fn open(
 
 pub(super) fn window_options(options: WindowOptions) -> WindowOptions {
     WindowOptions {
-        app_id: Some("com.kitlangton.Hex".into()),
+        app_id: Some("com.kitlangton.Said.ai".into()),
         ..options
     }
 }

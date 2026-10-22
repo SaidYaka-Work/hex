@@ -14,7 +14,6 @@ pub(super) const CAPABILITIES: Capabilities = Capabilities {
     fun: false,
     modes: true,
     voice_action: true,
-    history: true,
     permissions: false,
     dock_icon: false,
     launch_at_login: false,

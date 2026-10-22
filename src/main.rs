@@ -42,9 +42,7 @@ mod dictation_audio;
 mod dictation_diagnostics;
 #[cfg(target_os = "macos")]
 mod dictation_indicator;
-// Talk pastes Parakeet text and does not run mode processing. The module
-// remains for the preview editors and its tests.
-#[allow(dead_code)]
+// Preview editors and their tests still build mode runtimes. Talk does not.
 mod dictation_modes;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod dictation_processor;
@@ -59,8 +57,6 @@ mod hex_microphone;
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 mod history;
 mod instance;
-mod llm_backend;
-mod output_instructions;
 #[cfg(target_os = "macos")]
 mod keyboard;
 #[cfg_attr(target_os = "linux", allow(dead_code))]
@@ -91,6 +87,7 @@ mod linux_session;
 mod linux_updater;
 #[cfg(target_os = "linux")]
 mod linux_wayland_input;
+mod llm_backend;
 #[cfg(target_os = "macos")]
 mod local_api;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -116,6 +113,7 @@ mod moonshine_lab;
 mod motion;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod onboarding;
+mod output_instructions;
 #[cfg(target_os = "macos")]
 mod parakeet;
 #[cfg(target_os = "macos")]

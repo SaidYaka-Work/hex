@@ -1,7 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,8 @@ enum OutputJob {
     VoiceAction(Job),
     /// Pastes the newest completed dictation again.
     PasteLast,
+    /// A Talk to AI rewrite that finished off this thread.
+    DeferredPaste(String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -63,29 +65,20 @@ impl Drop for OutputWorker {
     }
 }
 
-/// What happens to a transcript before and after it is pasted: the modes
-/// that process it and the history that keeps it. The service shares it
-/// with the listener so saved settings apply without a restart.
+/// History retention for a pasted transcript. Talk does not run mode processing.
 #[derive(Clone)]
 pub struct DictationOutput {
     pub history: Option<crate::history::History>,
-    /// Updated when settings change. Talk pastes Parakeet text and does not
-    /// read modes.
-    #[allow(dead_code)]
-    pub modes: Arc<RwLock<crate::dictation_modes::ModeRuntime>>,
     pub transformations: Arc<crate::personal_commands::TransformationClient>,
 }
 
 impl DictationOutput {
     pub fn from_settings(
-        settings: &crate::app_settings::AppSettings,
+        _settings: &crate::app_settings::AppSettings,
         history: Option<crate::history::History>,
     ) -> Self {
         Self {
             history,
-            modes: Arc::new(RwLock::new(
-                crate::dictation_modes::ModeRuntime::from_settings(settings),
-            )),
             transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
         }
     }
@@ -102,7 +95,7 @@ impl DictationOutput {
         let context = crate::linux_context::capture();
         // Talk is the Parakeet transcript. Mode and OpenCode rewrites stay off
         // this path; standing instructions apply only through the one backend.
-        let text = crate::output_instructions::finish_talk(&raw_text);
+        let text = crate::output_instructions::finish_talk_unless_cancelled(&raw_text, false);
         let processed = crate::dictation_processor::Processed {
             text: text.clone(),
             observation: None,
@@ -182,6 +175,7 @@ pub fn run(
     let suppressor =
         crate::linux_audio_control::AudioSuppressor::new(settings.recording_audio_behavior);
     let (jobs, job_receiver) = mpsc::sync_channel::<OutputJob>(2);
+    let jobs_for_ai = jobs.clone();
     let (result_sender, results) = mpsc::channel();
     let worker_stop = output.stop.clone();
     output.worker = Some(thread::spawn(move || {
@@ -194,6 +188,20 @@ pub fn run(
             let (job, kind) = match job {
                 OutputJob::Dictation(job) => (job, OutputKind::Dictation),
                 OutputJob::VoiceAction(job) => (job, OutputKind::VoiceAction),
+                OutputJob::DeferredPaste(text) => {
+                    let result = paster
+                        .as_mut()
+                        .map_err(|error| eyre!("{error:#}"))
+                        .and_then(|paster| paster.paste(&text).map(|()| text))
+                        .map_err(|error| format!("{error:#}"));
+                    if result_sender
+                        .send((OutputKind::VoiceAction, result))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 OutputJob::PasteLast => {
                     let result = last_dictation
                         .clone()
@@ -228,7 +236,15 @@ pub fn run(
                 }
                 let paster = paster.as_mut().map_err(|error| eyre!("{error:#}"))?;
                 if kind == OutputKind::VoiceAction {
-                    return run_voice_action(&text, paster);
+                    return run_voice_action(
+                        &text,
+                        paster,
+                        jobs_for_ai.clone(),
+                        worker_stop.clone(),
+                    );
+                }
+                if worker_stop.load(Ordering::Acquire) {
+                    return Err(eyre!("dictation stopped"));
                 }
                 output_settings.deliver(text, paster, job.audio_ms, inference_ms, started)
             })()
@@ -518,15 +534,23 @@ pub fn run(
     Ok(())
 }
 
-/// Stores a Talk to AI instruction. A one-shot rewrite pastes only when the
-/// configured language model actually returns text.
-fn run_voice_action(instruction: &str, paster: &mut LinuxPaster) -> Result<String> {
+/// Queues a Talk to AI instruction. Classification and rewrite run off this
+/// thread; a one-shot paste comes back as [`OutputJob::DeferredPaste`].
+fn run_voice_action(
+    instruction: &str,
+    paster: &mut LinuxPaster,
+    jobs: mpsc::SyncSender<OutputJob>,
+    stop: Arc<AtomicBool>,
+) -> Result<String> {
     let selected = paster.selected_text();
-    let outcome = crate::output_instructions::accept(instruction, selected.as_deref());
-    if let Some(text) = outcome.paste.filter(|text| !text.trim().is_empty()) {
-        paster.paste(&text)?;
-        return Ok(text);
-    }
+    crate::output_instructions::enqueue(
+        instruction.to_string(),
+        selected,
+        Arc::new(move || stop.load(Ordering::Acquire)),
+        move |text| {
+            let _ = jobs.send(OutputJob::DeferredPaste(text));
+        },
+    );
     Ok(String::new())
 }
 

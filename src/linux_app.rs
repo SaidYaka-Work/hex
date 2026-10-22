@@ -200,7 +200,7 @@ pub fn run_service(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result
             }) => {
                 let result = (|| -> Result<()> {
                     if stopping {
-                        return Err(color_eyre::eyre::eyre!("Hex service is stopping"));
+                        return Err(color_eyre::eyre::eyre!("Said.ai service is stopping"));
                     }
                     if let Some((owner, deadline)) = &mut editor {
                         if *owner == client {
@@ -267,7 +267,12 @@ pub fn open(start_hidden: bool, event_path: PathBuf, shutdown: &'static AtomicBo
 /// and asks the service to reload it. Closing the window ends the process.
 fn open_settings(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result<()> {
     Application::new().run(move |cx: &mut App| {
+        crate::design_tokens::install_bundled_fonts(cx);
         cx.bind_keys(crate::text_input::key_bindings());
+        cx.bind_keys([
+            gpui::KeyBinding::new("cmd-,", crate::app_window::ShowSettings, None),
+            gpui::KeyBinding::new("cmd-1", crate::app_window::ShowSettings, None),
+        ]);
         let window =
             crate::app_window::open(event_path, cx).expect("could not open the Hex window");
         window
@@ -344,15 +349,9 @@ impl LinuxDesktopHost {
         host
     }
 
-    /// Applies saved settings the running listener reads live: modes,
-    /// history retention, and the transformations workspace.
+    /// Applies saved settings the running listener reads live: history
+    /// retention and the transformations workspace. Talk does not run modes.
     fn apply_output_settings(&mut self) {
-        *self
-            .output
-            .modes
-            .write()
-            .unwrap_or_else(|error| error.into_inner()) =
-            crate::dictation_modes::ModeRuntime::from_settings(&self.settings);
         if let Some(history) = &self.output.history
             && let Err(error) = history.set_retention(self.settings.history_retention)
         {

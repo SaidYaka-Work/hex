@@ -2698,44 +2698,46 @@ mod tests {
     }
 
     #[test]
-    fn talk_to_ai_chord_stays_reserved_when_the_old_opt_in_flips() {
+    fn talk_to_ai_chord_matches_only_the_saved_binding() {
         use crate::app_settings::{AppSettings, HotkeyKey};
 
         let mut settings = AppSettings::default();
+        let saved = settings.edit_hotkey.clone();
         settings.edit_hotkey.key = Some(HotkeyKey {
             code: 40,
             label: "K".into(),
         });
-        let event = |down| InputEvent::Key {
+        let matching = |down| InputEvent::Key {
             code: 40,
             down,
             flags: OPTION_KEY_MASK | COMMAND_KEY_MASK,
         };
+        let other = InputEvent::Key {
+            code: 41,
+            down: true,
+            flags: OPTION_KEY_MASK | COMMAND_KEY_MASK,
+        };
         for enabled in [false, true] {
-            let mut suppression = ShortcutSuppression::default();
             settings.voice_action.enabled = enabled;
-            assert!(
-                suppression.process_all(event(true), settings.runtime_hotkeys(), true, false)
+            assert_eq!(
+                settings.edit_hotkey.key.as_ref().map(|key| key.code),
+                Some(40)
             );
-            settings.voice_action.enabled = !enabled;
-            for delivered in [true, false] {
-                assert!(suppression.process_all(
-                    event(true),
-                    settings.runtime_hotkeys(),
-                    delivered,
-                    false
-                ));
-            }
-            assert!(
-                suppression.process_all(event(false), settings.runtime_hotkeys(), true, false)
-            );
-            assert!(
-                suppression.process_all(event(true), settings.runtime_hotkeys(), true, false)
-            );
-            assert!(
-                suppression.process_all(event(false), settings.runtime_hotkeys(), true, false)
-            );
+            let mut pressed = ShortcutSuppression::default();
+            assert!(pressed.process_all(matching(true), settings.runtime_hotkeys(), true, false));
+            let mut undelivered = ShortcutSuppression::default();
+            assert!(!undelivered.process_all(
+                matching(true),
+                settings.runtime_hotkeys(),
+                false,
+                false
+            ));
+            let mut unmatched = ShortcutSuppression::default();
+            assert!(!unmatched.process_all(other, settings.runtime_hotkeys(), true, false));
         }
+        assert_ne!(settings.edit_hotkey, saved);
+        settings.edit_hotkey = saved;
+        assert!(settings.runtime_hotkeys().edit.is_some());
     }
 
     #[test]

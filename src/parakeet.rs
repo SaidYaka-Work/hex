@@ -145,12 +145,16 @@ enum OutputJob {
         sequence: u64,
         kind: PasteKind,
     },
+    /// A Talk to AI rewrite that finished off this thread.
+    InstructionPaste {
+        text: String,
+    },
 }
 
 impl OutputJob {
     fn sequence(&self) -> u64 {
         match self {
-            Self::PreparePaste => u64::MAX,
+            Self::PreparePaste | Self::InstructionPaste { .. } => u64::MAX,
             Self::Completed { job_id, .. } | Self::Cancelled { job_id } => job_id.0,
             Self::Paste { sequence, .. } => *sequence,
         }
@@ -507,6 +511,13 @@ fn run_output_worker(
             paster.prepare();
             continue;
         }
+        if let OutputJob::InstructionPaste { text } = job {
+            if !text.trim().is_empty() {
+                let commit = || true;
+                let _ = paster.paste(&text, PasteMode::Standalone, &commit);
+            }
+            continue;
+        }
         for job in ordered.push(job) {
             let event = finish_output(
                 job,
@@ -548,19 +559,70 @@ fn run_processor_worker(
             let _ = output.send(OutputJob::Cancelled { job_id: job.job_id });
             continue;
         }
+        if matches!(job.target, TranscriptionTarget::VoiceAction) {
+            let sender = output.clone();
+            let control = Arc::clone(&job.control);
+            crate::output_instructions::enqueue(
+                job.text.clone(),
+                job.context.selected_text.clone(),
+                Arc::new(move || control.is_cancelled()),
+                move |text| {
+                    let _ = sender.send(OutputJob::InstructionPaste { text });
+                },
+            );
+            let _ = output.send(OutputJob::Completed {
+                job_id: job.job_id,
+                control: job.control,
+                target: job.target,
+                result: Box::new(Ok(CompletedTranscript {
+                    text: String::new(),
+                    raw: job.text,
+                    application: job.context.application,
+                    timings: job.timings,
+                    processing: None,
+                })),
+            });
+            continue;
+        }
+        if matches!(
+            job.target,
+            TranscriptionTarget::Paste | TranscriptionTarget::Send
+        ) {
+            if job.control.is_cancelled() {
+                let _ = output.send(OutputJob::Cancelled { job_id: job.job_id });
+                continue;
+            }
+            let text = crate::output_instructions::finish_talk_unless_cancelled(&job.text, false);
+            if job.control.is_cancelled() {
+                let _ = output.send(OutputJob::Cancelled { job_id: job.job_id });
+                continue;
+            }
+            if output
+                .send(OutputJob::Completed {
+                    job_id: job.job_id,
+                    control: job.control,
+                    target: job.target,
+                    result: Box::new(Ok(CompletedTranscript {
+                        text,
+                        raw: job.text,
+                        application: job.context.application,
+                        timings: job.timings,
+                        processing: None,
+                    })),
+                })
+                .is_err()
+            {
+                break;
+            }
+            continue;
+        }
         let mut processed = process_job_text(
             &job,
             || crate::config::dictation_profiles().without_language_model(),
-            || {
-                let outcome = crate::output_instructions::accept(
-                    &job.text,
-                    job.context.selected_text.as_deref(),
-                );
-                crate::dictation_processor::Processed {
-                    text: outcome.paste.unwrap_or_default(),
-                    observation: None,
-                    transformations: Vec::new(),
-                }
+            || crate::dictation_processor::Processed {
+                text: String::new(),
+                observation: None,
+                transformations: Vec::new(),
             },
             || {
                 let _ = events.send(WorkerEvent::Stage {
@@ -570,14 +632,6 @@ fn run_processor_worker(
             },
         );
         processed.apply_transformations(transformations, &job.context, &job.control.cancelled);
-        if matches!(
-            job.target,
-            TranscriptionTarget::Paste | TranscriptionTarget::Send
-        ) {
-            processed.text = crate::output_instructions::finish_talk(&job.text);
-            processed.observation = None;
-            processed.transformations.clear();
-        }
         if job.control.is_cancelled() {
             let _ = output.send(OutputJob::Cancelled { job_id: job.job_id });
             continue;
@@ -819,6 +873,9 @@ fn finish_output(
 ) -> WorkerEvent {
     match job {
         OutputJob::PreparePaste => unreachable!("paste preparation bypasses ordered output"),
+        OutputJob::InstructionPaste { .. } => {
+            unreachable!("instruction paste bypasses ordered output")
+        }
         OutputJob::Completed {
             job_id,
             control,

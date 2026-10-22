@@ -61,7 +61,6 @@ pub(crate) struct WindowsDesktopHost {
     history: Option<History>,
     last_dictation: Arc<Mutex<Option<String>>>,
     indicator: crate::windows_indicator::WindowsIndicatorSender,
-    mode_runtime: Arc<RwLock<crate::dictation_modes::ModeRuntime>>,
     transformations: Arc<crate::personal_commands::TransformationClient>,
     personal_commands: Option<crate::personal_commands::PersonalCommands>,
     personal_commands_checked_at: Instant,
@@ -107,7 +106,7 @@ impl AppInstance {
         let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
         if event.is_null() {
             return Err(eyre!(
-                "could not create the Hex instance event: {}",
+                "could not create the Said.ai instance event: {}",
                 std::io::Error::last_os_error()
             ));
         }
@@ -116,7 +115,7 @@ impl AppInstance {
             return Ok(Some(Self(event)));
         }
         if !start_hidden {
-            tracing::info!("Hex is already running; showing its window");
+            tracing::info!("Said.ai is already running; showing its window");
             // SAFETY: `event` is a valid handle owned by this function. A
             // launched app may take the foreground; pass that right on so
             // the running app can activate its window.
@@ -146,7 +145,7 @@ impl AppInstance {
                 }
             });
         if let Err(error) = spawned {
-            tracing::warn!(%error, "relaunching Hex will not show the running window");
+            tracing::warn!(%error, "relaunching Said.ai will not show the running window");
         }
     }
 }
@@ -172,7 +171,12 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
     let listen_on_launch = settings.enable_on_launch;
     let indicator_position = settings.indicator_position;
     Application::new().run(move |cx: &mut App| {
+        crate::design_tokens::install_bundled_fonts(cx);
         cx.bind_keys(crate::text_input::key_bindings());
+        cx.bind_keys([
+            gpui::KeyBinding::new("cmd-,", crate::app_window::ShowSettings, None),
+            gpui::KeyBinding::new("cmd-1", crate::app_window::ShowSettings, None),
+        ]);
         let host = Rc::new(RefCell::new(WindowsDesktopHost::new(
             event_path.clone(),
             settings.clone(),
@@ -190,7 +194,7 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
             listen_on_launch && !setup_done,
             cx,
         )
-        .expect("could not open the Hex window");
+        .expect("could not open the Said.ai window");
         let (indicator, indicator_hwnd, indicator_scale) = match cx
             .open_window(crate::windows_indicator::window_options(cx), |_, cx| {
                 cx.new(|_| crate::windows_indicator::WindowsIndicator::new())
@@ -215,7 +219,7 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
         let tray = match create_tray(tray_sender.clone()) {
             Ok(tray) => Some(tray),
             Err(error) => {
-                tracing::warn!(%error, "Windows system tray is unavailable; closing Hex will quit");
+                tracing::warn!(%error, "Windows system tray is unavailable; closing Said.ai will quit");
                 None
             }
         };
@@ -330,7 +334,7 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
 fn create_tray(commands: mpsc::Sender<TrayCommand>) -> Result<TrayIcon> {
     let menu = Menu::new();
     let show = MenuItem::with_id("show", tr("Show Said.ai"), true, None);
-    let toggle = MenuItem::with_id("toggle", tr("Enable / Disable Hex"), true, None);
+    let toggle = MenuItem::with_id("toggle", tr("Enable / Disable Said.ai"), true, None);
     let quit = MenuItem::with_id("quit", tr("Quit Said.ai"), true, None);
     menu.append(&show)?;
     menu.append(&toggle)?;
@@ -490,9 +494,6 @@ impl WindowsDesktopHost {
                 None
             }
         };
-        let mode_runtime = Arc::new(RwLock::new(
-            crate::dictation_modes::ModeRuntime::from_settings(&settings),
-        ));
         let voice_action_model = Arc::new(RwLock::new(voice_action_model(&settings)));
         let mut host = Self {
             event_path,
@@ -511,7 +512,6 @@ impl WindowsDesktopHost {
             history,
             last_dictation: Arc::new(Mutex::new(None)),
             indicator,
-            mode_runtime,
             transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
             personal_commands: None,
             personal_commands_checked_at: Instant::now(),
@@ -552,7 +552,6 @@ impl WindowsDesktopHost {
             history: self.history.clone(),
             last_dictation: self.last_dictation.clone(),
             indicator: Some(self.indicator.clone()),
-            mode_runtime: self.mode_runtime.clone(),
             transformations: self.transformations.clone(),
             voice_action_model: self.voice_action_model.clone(),
             ..crate::windows_dictation::WindowsDictationConfig::from_settings(&self.settings)
@@ -626,7 +625,10 @@ impl WindowsDesktopHost {
             return Err(eyre!("no installed Windows update is ready"));
         };
         crate::windows_updater::relaunch_at(&executable).inspect_err(|error| {
-            self.error = Some(tr_fill("Could not restart Hex: {}", &format!("{error:#}")));
+            self.error = Some(tr_fill(
+                "Could not restart Said.ai: {}",
+                &format!("{error:#}"),
+            ));
         })?;
         self.stop();
         Ok(())
@@ -648,13 +650,6 @@ impl WindowsDesktopHost {
         let previous = std::mem::replace(&mut self.settings, settings.clone());
         let current = settings;
         let modes_changed = previous.dictation_processing != current.dictation_processing;
-        if modes_changed {
-            *self
-                .mode_runtime
-                .write()
-                .unwrap_or_else(|error| error.into_inner()) =
-                crate::dictation_modes::ModeRuntime::from_settings(current);
-        }
         if previous.voice_action != current.voice_action {
             *self
                 .voice_action_model

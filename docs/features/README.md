@@ -25,11 +25,14 @@ HEX                                      // macOS release
 ```
 
 The running window is Said.ai. Talk holds the dictation shortcut and pastes
-local Parakeet English with no language model. Talk to AI holds the second
-shortcut and stores a spoken instruction: short-term until it is changed or
-the app quits, long-term in `output-instructions.json`. The home screen lists
-the instructions that are active. The language model that would apply them is
-`llm_backend::LLM_BACKEND`, currently unconfigured, so Talk stays verbatim.
+local Parakeet English. Talk never calls a language model. Talk to AI holds
+the second shortcut. When `GEMINI_API_KEY` is set, `llm_backend::LLM_BACKEND`
+(provider Gemini Flash, model `gemini-3.5-flash-lite`) classifies the
+utterance and rewrites one-shots. Session and saved instructions are included
+in that rewrite. Saying only "write formally" stores the instruction and does
+not change later Talk dictation. A missing key shows "AI is not configured"
+and leaves the dictated text unchanged. History retention, voice commands, and
+mode processing are forced off on load. Saved mode text is kept and not applied.
 History, Commands, and Modes are not in the window and have no hotkeys.
 Transcription is pinned to Parakeet Unified English, including the first-run
 download, and there is no model or provider picker. Preview fixtures can still

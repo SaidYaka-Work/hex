@@ -1,8 +1,8 @@
 {
   "fill": {
     "linear-gradient": [
-      "gray:0.19846,1.00000",
-      "srgb:0.00000,0.00000,0.00000,1.00000"
+      "srgb:0.95686,0.93725,0.90196,1.00000",
+      "srgb:0.70588,0.32549,0.16471,1.00000"
     ],
     "orientation": {
       "start": {
@@ -20,7 +20,7 @@
       "layers": [
         {
           "image-name": "Image.png",
-          "name": "HEX",
+          "name": "Said.ai",
           "position": {
             "scale": 0.5,
             "translation-in-points": [

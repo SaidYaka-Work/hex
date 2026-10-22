@@ -3,9 +3,12 @@
 //! name these tokens; `docs/design-system.md` explains when to use each one.
 //!
 //! Said.ai follows saidyaka.com: warm paper (`#f4efe6`), near-black ink,
-//! a terracotta eyebrow, white cards, and pill-shaped near-black buttons.
+//! terracotta (`#b4532a`, `#e8a87c` in the dark theme), white cards, and
+//! pill-shaped buttons. Rows and menus use a smaller corner.
 
-use gpui::{FontWeight, Pixels, Styled, px};
+use std::cell::Cell;
+
+use gpui::{FontWeight, Pixels, Styled, WindowAppearance, px};
 
 // Surfaces: warm paper, with white cards sitting on it.
 pub(crate) const SIDEBAR: u32 = 0xefe8dc;
@@ -25,10 +28,10 @@ pub(crate) const TEXT_SECONDARY: u32 = 0x3a3832;
 pub(crate) const TEXT_TERTIARY: u32 = 0x5c564e;
 pub(crate) const TEXT_DISABLED: u32 = 0xa39e94;
 
-// The primary button is near-black ink, like saidyaka.com's pill.
-// Terracotta is the small-label accent, not the button fill.
-pub(crate) const ACCENT: u32 = 0x161613;
-pub(crate) const ON_ACCENT: u32 = 0xfffdf8;
+// Primary buttons use saidyaka.com terracotta. Ink stays the text colour.
+// `ON_ACCENT` is one step off card white so the dark theme can map it to ink.
+pub(crate) const ACCENT: u32 = 0xb4532a;
+pub(crate) const ON_ACCENT: u32 = 0xfffef9;
 pub(crate) const ACCENT_TEXT: u32 = 0x8c3f28;
 pub(crate) const ACCENT_SURFACE: u32 = 0xf8ebe3;
 pub(crate) const ACCENT_BORDER: u32 = 0xe7d3c6;
@@ -95,14 +98,106 @@ pub(crate) const KEYCAP_SIDE_BADGE: TypeStep = TypeStep {
 
 pub(crate) const MONOSPACE_FAMILY: &str = "SF Mono";
 
-/// Editorial headlines. Each OS uses a serif that ships with the system;
-/// Linux installs use Liberation Serif.
-#[cfg(target_os = "linux")]
-pub(crate) const SERIF_FAMILY: &str = "Liberation Serif";
-#[cfg(target_os = "macos")]
-pub(crate) const SERIF_FAMILY: &str = "New York";
-#[cfg(target_os = "windows")]
-pub(crate) const SERIF_FAMILY: &str = "Georgia";
+/// Bundled Instrument Sans. Body copy uses it once [`install_bundled_fonts`]
+/// has registered the file.
+pub(crate) const SANS_FAMILY: &str = "Instrument Sans";
+/// Bundled Instrument Serif for the wordmark and pane titles.
+pub(crate) const SERIF_FAMILY: &str = "Instrument Serif";
+
+thread_local! {
+    static DARK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Follows the system appearance for the current render.
+pub(crate) fn follow_window(window: &gpui::Window) {
+    set_dark(matches!(
+        window.appearance(),
+        WindowAppearance::Dark | WindowAppearance::VibrantDark
+    ));
+}
+
+pub(crate) fn set_dark(dark: bool) {
+    DARK.with(|cell| cell.set(dark));
+}
+
+fn dark_theme() -> bool {
+    DARK.with(Cell::get)
+}
+
+const DARK_SIDEBAR: u32 = 0x141210;
+const DARK_SIDEBAR_HOVER: u32 = 0x2c2822;
+const DARK_CANVAS: u32 = 0x1c1916;
+const DARK_SURFACE: u32 = 0x26221c;
+const DARK_SURFACE_HOVER: u32 = 0x322c24;
+const DARK_LINE: u32 = 0x3d362c;
+const DARK_LINE_STRONG: u32 = 0x564c40;
+const DARK_SCRIM: u32 = 0x0c0b09cc;
+const DARK_TEXT_PRIMARY: u32 = 0xf4efe6;
+const DARK_TEXT_SECONDARY: u32 = 0xd5cec2;
+const DARK_TEXT_TERTIARY: u32 = 0xb7aea0;
+const DARK_TEXT_DISABLED: u32 = 0x7d756a;
+const DARK_ACCENT: u32 = 0xe8a87c;
+const DARK_ON_ACCENT: u32 = 0x161613;
+const DARK_ACCENT_TEXT: u32 = 0xe8a87c;
+const DARK_ACCENT_SURFACE: u32 = 0x2a1a12;
+const DARK_ACCENT_BORDER: u32 = 0x6b4632;
+const DARK_SELECTION: u32 = 0xf4efe633;
+const DARK_SUCCESS: u32 = 0x86efac;
+const DARK_SUCCESS_SURFACE: u32 = 0x14281c;
+const DARK_DANGER: u32 = 0xfb7185;
+const DARK_DANGER_SURFACE: u32 = 0x2a1218;
+const DARK_DANGER_BORDER: u32 = 0x6b3040;
+
+/// The colour to paint. Light values stay as written; a dark system appearance
+/// maps each token. Call [`follow_window`] at the start of a render.
+pub(crate) fn paint(light: u32) -> u32 {
+    if !dark_theme() {
+        return light;
+    }
+    match light {
+        SIDEBAR => DARK_SIDEBAR,
+        // SURFACE_SELECTED shares this value, so one arm covers both.
+        SIDEBAR_HOVER => DARK_SIDEBAR_HOVER,
+        CANVAS => DARK_CANVAS,
+        SURFACE => DARK_SURFACE,
+        SURFACE_HOVER => DARK_SURFACE_HOVER,
+        LINE => DARK_LINE,
+        LINE_STRONG => DARK_LINE_STRONG,
+        SCRIM => DARK_SCRIM,
+        TEXT_PRIMARY => DARK_TEXT_PRIMARY,
+        TEXT_SECONDARY => DARK_TEXT_SECONDARY,
+        TEXT_TERTIARY => DARK_TEXT_TERTIARY,
+        TEXT_DISABLED => DARK_TEXT_DISABLED,
+        ACCENT => DARK_ACCENT,
+        ON_ACCENT => DARK_ON_ACCENT,
+        ACCENT_TEXT => DARK_ACCENT_TEXT,
+        ACCENT_SURFACE => DARK_ACCENT_SURFACE,
+        ACCENT_BORDER => DARK_ACCENT_BORDER,
+        SELECTION => DARK_SELECTION,
+        SUCCESS => DARK_SUCCESS,
+        SUCCESS_SURFACE => DARK_SUCCESS_SURFACE,
+        DANGER => DARK_DANGER,
+        DANGER_SURFACE => DARK_DANGER_SURFACE,
+        DANGER_BORDER => DARK_DANGER_BORDER,
+        _ => light,
+    }
+}
+
+/// Registers Instrument Sans and Instrument Serif with GPUI.
+pub(crate) fn install_bundled_fonts(cx: &gpui::App) {
+    let fonts = vec![
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/InstrumentSans.ttf").as_slice()),
+        std::borrow::Cow::Borrowed(
+            include_bytes!("../assets/fonts/InstrumentSerif-Regular.ttf").as_slice(),
+        ),
+        std::borrow::Cow::Borrowed(
+            include_bytes!("../assets/fonts/InstrumentSerif-Italic.ttf").as_slice(),
+        ),
+    ];
+    if let Err(error) = cx.text_system().add_fonts(fonts) {
+        tracing::warn!(%error, "could not install Said.ai fonts");
+    }
+}
 
 /// SF Pro's ascender and descender as fractions of the font size.
 const FONT_ASCENT: f32 = 0.952;
@@ -131,15 +226,15 @@ pub(crate) trait Typography: Styled + Sized {
     }
 
     fn text_caption(self) -> Self {
-        self.text_step(CAPTION)
+        self.text_step(CAPTION).font_family(SANS_FAMILY)
     }
 
     fn text_footnote(self) -> Self {
-        self.text_step(FOOTNOTE)
+        self.text_step(FOOTNOTE).font_family(SANS_FAMILY)
     }
 
     fn text_body(self) -> Self {
-        self.text_step(BODY)
+        self.text_step(BODY).font_family(SANS_FAMILY)
     }
 
     fn text_headline(self) -> Self {
@@ -168,9 +263,10 @@ pub(crate) const SPACE_2: f32 = 8.0;
 
 // Radii.
 pub(crate) const RADIUS_SMALL: Pixels = px(4.0);
-/// Pill controls: half of [`CONTROL_HEIGHT_LARGE`], so the home buttons match
-/// the fully rounded pills on saidyaka.com. Shorter controls clip to a pill too.
-pub(crate) const RADIUS_CONTROL: Pixels = px(22.0);
+/// Rows, menus, inputs, and dropdowns.
+pub(crate) const RADIUS_CONTROL: Pixels = px(8.0);
+/// Buttons only. Half of [`CONTROL_HEIGHT_LARGE`], so the home actions are pills.
+pub(crate) const RADIUS_PILL: Pixels = px(22.0);
 pub(crate) const RADIUS_PANEL: Pixels = px(16.0);
 pub(crate) const RADIUS_MODAL: Pixels = px(12.0);
 pub(crate) const RADIUS_KNOB: Pixels = px(2.0);
@@ -217,6 +313,14 @@ pub(crate) const PANE_HEADER_HEIGHT: f32 = 70.0;
 pub(crate) const PANE_GUTTER: f32 = 32.0;
 /// The one content width every pane is bounded to.
 pub(crate) const PANE_CONTENT_WIDTH: f32 = 940.0;
+/// The home column.
+pub(crate) const HOME_COLUMN: f32 = 420.0;
+/// The widest active-instruction row on the home.
+pub(crate) const HOME_INSTRUCTION: f32 = 360.0;
+/// The settings sheet on the home.
+pub(crate) const SETTINGS_SHEET: f32 = 560.0;
+/// Tallest the sheet grows before its body scrolls, inside the default window.
+pub(crate) const SETTINGS_SHEET_MAX_HEIGHT: f32 = 620.0;
 /// The list column of a list+detail pane.
 pub(crate) const PANE_LIST_WIDTH: f32 = 320.0;
 /// The narrower list column for panes whose detail is an editor (Modes).
@@ -353,6 +457,38 @@ mod tests {
             let ratio = contrast(text, surface);
             assert!(ratio >= 4.5, "{text:06x} on {surface:06x} is {ratio:.2}:1");
         }
+        let on_accent = contrast(ON_ACCENT, ACCENT);
+        assert!(
+            on_accent >= 4.5,
+            "accent label {ON_ACCENT:06x} on {ACCENT:06x} is {on_accent:.2}:1"
+        );
+    }
+
+    #[test]
+    fn dark_theme_keeps_aa_contrast() {
+        set_dark(true);
+        for background in [SIDEBAR, CANVAS, SURFACE, SURFACE_HOVER, SURFACE_SELECTED] {
+            for text in [TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY] {
+                let ratio = contrast(paint(text), paint(background));
+                assert!(
+                    ratio >= 4.5,
+                    "dark {text:06x} on {background:06x} is {ratio:.2}:1"
+                );
+            }
+        }
+        for (text, surface) in [
+            (ON_ACCENT, ACCENT),
+            (ACCENT_TEXT, ACCENT_SURFACE),
+            (SUCCESS, SUCCESS_SURFACE),
+            (DANGER, DANGER_SURFACE),
+        ] {
+            let ratio = contrast(paint(text), paint(surface));
+            assert!(
+                ratio >= 4.5,
+                "dark {text:06x} on {surface:06x} is {ratio:.2}:1"
+            );
+        }
+        set_dark(false);
     }
 
     #[test]

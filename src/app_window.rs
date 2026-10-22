@@ -78,6 +78,8 @@ const TOUR_PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_millis(400);
 const MAX_OPENCODE_ERROR_BYTES: usize = 4 * 1024;
 const ACTIVITY_LIMIT: usize = 100;
 const OPENCODE_BETA_DOCS_URL: &str = "https://v2.opencode.ai/";
+/// Approximate Parakeet English download, used only for the home progress track.
+const PARAKEET_DOWNLOAD_BYTES: f32 = 600_000_000.0;
 
 // Each OS supplies the same set of `platform` items: its window state, the
 // capabilities below, window chrome, and the actions only its runtime can
@@ -107,10 +109,6 @@ struct Capabilities {
     fun: bool,
     modes: bool,
     voice_action: bool,
-    /// History is not in the window. The flag stays so each OS's capability
-    /// list still records that the runtime could retain dictation.
-    #[allow(dead_code)]
-    history: bool,
     /// Privacy permissions gate dictation (macOS).
     permissions: bool,
     dock_icon: bool,
@@ -174,7 +172,7 @@ fn microphone_picker_menu(
 
 /// The sidebar's Update button, shown while an update is available.
 fn sidebar_update_button() -> gpui::Stateful<Div> {
-    button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
+    button(ButtonKind::Secondary, status_dot(paint(ACCENT_TEXT)))
         .child(tr("Update"))
         .id("check-for-updates-sidebar")
 }
@@ -479,7 +477,9 @@ impl Pane {
                 Self::Settings => true,
                 // History, Commands, and Modes are not part of the Said.ai window.
                 Self::Modes | Self::Commands | Self::History => false,
-                Self::VoiceAction => capabilities.voice_action,
+                // Voice Action is not in the running window. Talk to AI uses the
+                // saved instruction shortcut and the Gemini backend.
+                Self::VoiceAction => false,
                 Self::Fun => capabilities.fun && fun,
                 Self::Meetings => capabilities.meetings && (developer_features || meetings),
                 Self::HudLab => capabilities.hud_lab && developer_features,
@@ -649,11 +649,11 @@ impl Render for TransformationDrag {
                     .items_center()
                     .rounded(RADIUS_CONTROL)
                     .border_1()
-                    .border_color(rgb(LINE_STRONG))
-                    .bg(rgb(SURFACE_SELECTED))
+                    .border_color(rgb(paint(LINE_STRONG)))
+                    .bg(rgb(paint(SURFACE_SELECTED)))
                     .shadow_lg()
                     .text_body()
-                    .text_color(rgb(TEXT_PRIMARY))
+                    .text_color(rgb(paint(TEXT_PRIMARY)))
                     .child(self.name.clone()),
             )
     }
@@ -713,11 +713,11 @@ fn opencode_unavailable_copy(
             title: tr("Checking for OpenCode"),
             description: match feature {
                 OpenCodeFeature::VoiceAction => {
-                    tr("Voice Action will be available after Hex connects to OpenCode.")
+                    tr("Voice Action will be available after Said.ai connects to OpenCode.")
                 }
-                OpenCodeFeature::Transformation => {
-                    tr("OpenCode transformation will be available after Hex connects to OpenCode.")
-                }
+                OpenCodeFeature::Transformation => tr(
+                    "OpenCode transformation will be available after Said.ai connects to OpenCode.",
+                ),
             },
             error: None,
             can_retry: false,
@@ -744,7 +744,7 @@ fn opencode_unavailable_copy(
         }),
         ModelCatalogState::Failed(error) => Some(OpenCodeUnavailableCopy {
             title: tr("OpenCode is unavailable"),
-            description: tr("Hex could not load the OpenCode model catalog."),
+            description: tr("Said.ai could not load the OpenCode model catalog."),
             error: Some(error.clone()),
             can_retry: true,
             retry_label: tr("Retry"),
@@ -903,7 +903,8 @@ struct NavigationSidebar {
 }
 
 impl Render for NavigationSidebar {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        follow_window(window);
         let items = Pane::all_with_fun(
             platform::CAPABILITIES,
             crate::DEVELOPER_FEATURES_ENABLED,
@@ -962,7 +963,7 @@ impl Render for NavigationSidebar {
                             .flex_none()
                             .pl_3()
                             .text_caption()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(tr_fill("Version {}", env!("CARGO_PKG_VERSION"))),
                     )
                     .children(update_button),
@@ -986,6 +987,7 @@ impl FunWaveformView {
 
 impl Render for FunWaveformView {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        follow_window(window);
         use crate::hex_microphone::DemoSourceKind;
 
         let _frame_guard = crate::motion::begin_frame("FunWaveform");
@@ -1061,7 +1063,7 @@ impl Render for FunWaveformView {
                 .items_center()
                 .gap(px(2.0))
                 .rounded(RADIUS_SMALL)
-                .bg(rgb(SURFACE))
+                .bg(rgb(paint(SURFACE)))
                 .children(bars.iter().enumerate().map(|(idx, &bar_val)| {
                     let bar_ms = ((idx as f64) + 0.5) / (total_bars as f64) * duration_f;
                     let in_span = bar_ms >= demo.span.start_ms && bar_ms <= demo.span.end_ms;
@@ -1092,8 +1094,8 @@ impl Render for FunWaveformView {
             .gap_2p5()
             .rounded(RADIUS_CONTROL)
             .border_1()
-            .border_color(rgb(LINE))
-            .bg(rgb(CANVAS))
+            .border_color(rgb(paint(LINE)))
+            .bg(rgb(paint(CANVAS)))
             .child(
                 div()
                     .h(px(TAG_HEIGHT))
@@ -1110,7 +1112,7 @@ impl Render for FunWaveformView {
                             .child(
                                 div()
                                     .text_footnote()
-                                    .text_color(rgb(TEXT_SECONDARY))
+                                    .text_color(rgb(paint(TEXT_SECONDARY)))
                                     .child(clip_quote),
                             )
                             .child(span_badge),
@@ -1123,7 +1125,7 @@ impl Render for FunWaveformView {
                             .justify_end()
                             .text_caption()
                             .text_monospace()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(format!("{duration_s:.1}s")),
                     ),
             )
@@ -1137,7 +1139,7 @@ impl Render for FunWaveformView {
                             .w(px(80.0))
                             .flex_none()
                             .text_caption()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(tr("You")),
                     )
                     .child(render_waveform_bars(&bars_you, false)),
@@ -1153,7 +1155,7 @@ impl Render for FunWaveformView {
                             .flex_none()
                             .text_caption()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(ACCENT_TEXT))
+                            .text_color(rgb(paint(ACCENT_TEXT)))
                             .child(tr("Call hears")),
                     )
                     .child(render_waveform_bars(&bars_call, true)),
@@ -1196,6 +1198,8 @@ pub struct AppWindow {
     settings_load_error: Option<String>,
     /// What the last home button did, shown under Talk / Talk to AI.
     home_notice: String,
+    /// The slim settings sheet over the home.
+    settings_sheet: bool,
     /// Parakeet English download was considered for this window.
     parakeet_checked: bool,
     /// Last Talk to AI instruction revision rendered into `home_notice`.
@@ -1322,6 +1326,7 @@ impl AppWindow {
                         let login_item_changed = window.poll_login_item();
                         let personal_commands_changed = window.poll_personal_commands();
                         let personal_workspace_changed = window.poll_personal_workspace();
+                        window.ensure_parakeet();
                         let history_changed = window.poll_history(cx);
                         let instructions_changed = window.poll_instructions();
                         let platform_changed = window.poll_platform(cx);
@@ -1594,7 +1599,7 @@ impl AppWindow {
                 cx,
                 tr("Your words will appear here"),
                 if onboarding_preview == Some(OnboardingPreview::TryItLanded) {
-                    tr("Hex turns what I say into text, right where I'm typing.")
+                    tr("Said.ai turns what I say into text, right where I'm typing.")
                 } else {
                     ""
                 },
@@ -1822,6 +1827,7 @@ impl AppWindow {
             settings,
             settings_load_error,
             home_notice: String::new(),
+            settings_sheet: false,
             parakeet_checked: false,
             instruction_revision: crate::output_instructions::revision(),
             #[cfg(test)]
@@ -2031,6 +2037,11 @@ impl AppWindow {
 
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn show_settings(&mut self, cx: &mut Context<Self>) {
+        if self.uses_simplified_home() {
+            self.settings_sheet = true;
+            cx.notify();
+            return;
+        }
         self.select_pane(Pane::Settings, cx);
     }
 
@@ -2740,7 +2751,11 @@ impl AppWindow {
             div()
                 .w_full()
                 .when(!first, |section| {
-                    section.mt_5().pt_5().border_t_1().border_color(rgb(LINE))
+                    section
+                        .mt_5()
+                        .pt_5()
+                        .border_t_1()
+                        .border_color(rgb(paint(LINE)))
                 })
                 .child(section_label(label))
         };
@@ -2773,7 +2788,7 @@ impl AppWindow {
                             div()
                                 .pt_2()
                                 .text_body()
-                                .text_color(rgb(TEXT_PRIMARY))
+                                .text_color(rgb(paint(TEXT_PRIMARY)))
                                 .child(entry.final_text.clone()),
                         ),
                     )
@@ -2783,7 +2798,7 @@ impl AppWindow {
                                 div()
                                     .pt_2()
                                     .text_body()
-                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .text_color(rgb(paint(TEXT_TERTIARY)))
                                     .child(entry.raw_text.clone()),
                             ),
                         )
@@ -2795,7 +2810,7 @@ impl AppWindow {
                             .flex()
                             .flex_col()
                             .border_t_1()
-                            .border_color(rgb(LINE))
+                            .border_color(rgb(paint(LINE)))
                             .when_some(entry.application.clone(), |rows, application| {
                                 rows.child(detail_row(tr("Application"), application))
                             })
@@ -2879,9 +2894,9 @@ impl AppWindow {
             self.hotkey_capture,
             HotkeyCaptureState::Saved { kind: active, .. } if active == kind
         ) {
-            rgb(SUCCESS_SURFACE)
+            rgb(paint(SUCCESS_SURFACE))
         } else {
-            rgb(DANGER_SURFACE)
+            rgb(paint(DANGER_SURFACE))
         };
         let pulse = match &self.hotkey_capture {
             HotkeyCaptureState::Listening {
@@ -2921,7 +2936,7 @@ impl AppWindow {
                             .size(px(5.0 + pulse * 3.0))
                             .ml_2()
                             .rounded_full()
-                            .bg(rgb(DANGER))
+                            .bg(rgb(paint(DANGER)))
                             .opacity(0.6 + pulse * 0.4),
                     )
                     .when(!modifiers.is_empty() && message.is_none(), |content| {
@@ -2937,7 +2952,7 @@ impl AppWindow {
                     .child(
                         div()
                             .text_footnote()
-                            .text_color(rgb(TEXT_SECONDARY))
+                            .text_color(rgb(paint(TEXT_SECONDARY)))
                             .child(label),
                     )
                     .child(
@@ -2972,7 +2987,7 @@ impl AppWindow {
                 .child(
                     div()
                         .text_footnote()
-                        .text_color(rgb(TEXT_SECONDARY))
+                        .text_color(rgb(paint(TEXT_SECONDARY)))
                         .child(tr("Change shortcut")),
                 )
                 .into_any_element(),
@@ -2994,17 +3009,17 @@ impl AppWindow {
             .rounded(RADIUS_CONTROL)
             .border_1()
             .border_color(mix_color(
-                rgb(LINE),
-                rgb(TEXT_SECONDARY),
+                rgb(paint(LINE)),
+                rgb(paint(TEXT_SECONDARY)),
                 control_intensity * 0.55,
             ))
             .bg(mix_color(
-                rgb(CANVAS),
+                rgb(paint(CANVAS)),
                 capture_color,
                 control_intensity * (0.55 + pulse * 0.15),
             ))
             .when(!capture_active, |control| {
-                control.hover(|control| control.bg(rgb(SURFACE_HOVER)))
+                control.hover(|control| control.bg(rgb(paint(SURFACE_HOVER))))
             })
             .child(content)
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -3281,7 +3296,7 @@ impl AppWindow {
                     .items_center()
                     .gap_2()
                     .when(index + 1 < replacement_count, |row| {
-                        row.border_b_1().border_color(rgb(LINE))
+                        row.border_b_1().border_color(rgb(paint(LINE)))
                     })
                     .child(
                         div()
@@ -3335,7 +3350,7 @@ impl AppWindow {
                         .px_4()
                         .py_3()
                         .text_footnote()
-                        .text_color(rgb(TEXT_TERTIARY))
+                        .text_color(rgb(paint(TEXT_TERTIARY)))
                         .child(tr("No corrections in this mode.")),
                 )
             })
@@ -3523,7 +3538,7 @@ impl AppWindow {
             (true, crate::dictation::ShortcutMode::Hold) => {
                 tr_fill("Ready anywhere · Hold {} to dictate", &shortcut)
             }
-            (false, _) => tr_fill("Enable Hex to dictate into any app with {}", &shortcut),
+            (false, _) => tr_fill("Enable Said.ai to dictate into any app with {}", &shortcut),
         };
         let action = button(
             ButtonKind::Secondary,
@@ -3570,7 +3585,7 @@ impl AppWindow {
                                             .child(
                                                 div()
                                                     .text_body()
-                                                    .text_color(rgb(TEXT_PRIMARY))
+                                                    .text_color(rgb(paint(TEXT_PRIMARY)))
                                                     .child(tr(&listener.status).to_string()),
                                             )
                                             .child(truncated_line(FOOTNOTE, hint))
@@ -3583,7 +3598,7 @@ impl AppWindow {
                                                             &failure,
                                                         ),
                                                     )
-                                                    .text_color(rgb(DANGER)),
+                                                    .text_color(rgb(paint(DANGER))),
                                                 )
                                             }),
                                     ),
@@ -3592,7 +3607,10 @@ impl AppWindow {
                     ),
                 )
                 .when_some(listener.error, |card, error| {
-                    card.child(error_message(tr("Hex could not apply this change."), error))
+                    card.child(error_message(
+                        tr("Said.ai could not apply this change."),
+                        error,
+                    ))
                 })
                 .into_any_element(),
         )
@@ -3675,12 +3693,12 @@ impl AppWindow {
             ),
             SoftwareUpdate::Current if !platform::MANUAL_UPDATE_CHECK => div()
                 .text_footnote()
-                .text_color(rgb(TEXT_TERTIARY))
+                .text_color(rgb(paint(TEXT_TERTIARY)))
                 .child(tr("Up to date"))
                 .into_any_element(),
             SoftwareUpdate::Failed if !platform::MANUAL_UPDATE_CHECK => div()
                 .text_footnote()
-                .text_color(rgb(TEXT_TERTIARY))
+                .text_color(rgb(paint(TEXT_TERTIARY)))
                 .child(tr("Check failed; retrying later"))
                 .into_any_element(),
             SoftwareUpdate::Current | SoftwareUpdate::Failed => {
@@ -3697,7 +3715,7 @@ impl AppWindow {
     }
 
     fn render_update_button(&self, label: String, cx: &mut Context<Self>) -> AnyElement {
-        button(ButtonKind::Secondary, status_dot(ACCENT_TEXT))
+        button(ButtonKind::Secondary, status_dot(paint(ACCENT_TEXT)))
             .child(label)
             .id("software-update")
             .debug_selector(|| "software-update".into())
@@ -3825,7 +3843,7 @@ impl AppWindow {
         let launch_at_login_control = if self.launch_at_login_status.is_none() {
             div()
                 .text_footnote()
-                .text_color(rgb(TEXT_TERTIARY))
+                .text_color(rgb(paint(TEXT_TERTIARY)))
                 .child(if self.login_item_worker.is_some() {
                     tr("Checking…")
                 } else {
@@ -3930,8 +3948,8 @@ impl AppWindow {
                 .justify_between()
                 .gap_4()
                 .border_b_1()
-                .border_color(rgb(LINE))
-                .bg(rgb(CANVAS))
+                .border_color(rgb(paint(LINE)))
+                .bg(rgb(paint(CANVAS)))
                 .child(
                     div().flex_1().min_w_0().child(settings_copy(
                         tr("Release the microphone when idle?"),
@@ -4134,7 +4152,7 @@ impl AppWindow {
                         .when(capabilities.launch_at_login, |panel| panel.child(
                             settings_row(
                                 tr("Launch at login"),
-                                tr("Start Hex when you log in"),
+                                tr("Start Said.ai when you log in"),
                                 launch_at_login_control,
                             )
                             .id("launch-at-login-setting")
@@ -4160,7 +4178,7 @@ impl AppWindow {
                         .when(capabilities.listener_control, |panel| panel.child(
                             settings_row(
                                 tr("Enable on launch"),
-                                tr("Turn Hex on in every app whenever it opens"),
+                                tr("Turn Said.ai on in every app whenever it opens"),
                                 toggle(enable_on_launch_position),
                             )
                             .id("enable-on-launch-setting")
@@ -4176,7 +4194,7 @@ impl AppWindow {
                         .when(capabilities.dock_icon, |panel| panel.child(
                             settings_row(
                                 tr("Show Dock icon"),
-                                tr("Keep Hex in the menu bar when Settings is closed"),
+                                tr("Keep Said.ai in the menu bar when Settings is closed"),
                                 toggle(dock_icon_position),
                             )
                             .id("dock-icon-setting")
@@ -4192,7 +4210,7 @@ impl AppWindow {
                             panel.child(
                                 settings_row(
                                     tr("Interface language"),
-                                    tr("Language of the Hex interface"),
+                                    tr("Language of the Said.ai interface"),
                                     control,
                                 )
                                 .id("interface-language-setting"),
@@ -4211,7 +4229,7 @@ impl AppWindow {
                             panel.child(
                                 settings_row(
                                     tr("Software updates"),
-                                    tr("Checks for new Hex releases in the background"),
+                                    tr("Checks for new Said.ai releases in the background"),
                                     control,
                                 )
                                 .border_b_0()
@@ -4503,14 +4521,14 @@ impl AppWindow {
                     .items_center()
                     .justify_between()
                     .text_footnote()
-                    .child(div().text_color(rgb(TEXT_SECONDARY)).child(label))
+                    .child(div().text_color(rgb(paint(TEXT_SECONDARY))).child(label))
                     .child(
                         div()
                             .min_w(px(56.0))
                             .flex()
                             .justify_end()
                             .text_monospace()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(display),
                     ),
             )
@@ -4524,9 +4542,9 @@ impl AppWindow {
                     .flex()
                     .items_center()
                     .rounded(RADIUS_CONTROL)
-                    .bg(rgb(CANVAS))
+                    .bg(rgb(paint(CANVAS)))
                     .border_1()
-                    .border_color(rgb(LINE))
+                    .border_color(rgb(paint(LINE)))
                     .cursor_pointer()
                     .child(
                         div()
@@ -4534,13 +4552,13 @@ impl AppWindow {
                             .h(px(4.0))
                             .relative()
                             .rounded(RADIUS_KNOB)
-                            .bg(rgb(LINE_STRONG))
+                            .bg(rgb(paint(LINE_STRONG)))
                             .child(
                                 div()
                                     .w(gpui::relative(value))
                                     .h_full()
                                     .rounded(RADIUS_KNOB)
-                                    .bg(rgb(ACCENT)),
+                                    .bg(rgb(paint(ACCENT))),
                             )
                             .child(
                                 div()
@@ -4550,7 +4568,7 @@ impl AppWindow {
                                         .clamp(0.0, TRACK_WIDTH - 24.0)))
                                     .size(px(12.0))
                                     .rounded_full()
-                                    .bg(rgb(TEXT_PRIMARY)),
+                                    .bg(rgb(paint(TEXT_PRIMARY))),
                             ),
                     )
                     .child(
@@ -5042,7 +5060,7 @@ impl AppWindow {
         });
 
         let record_btn = if demo.is_recording {
-            button(ButtonKind::Danger, status_dot(DANGER))
+            button(ButtonKind::Danger, status_dot(paint(DANGER)))
                 .id("fun-demo-record")
                 .min_w(px(124.0))
                 .justify_center()
@@ -5053,7 +5071,7 @@ impl AppWindow {
                     cx.notify();
                 }))
         } else {
-            button(ButtonKind::Secondary, status_dot(DANGER))
+            button(ButtonKind::Secondary, status_dot(paint(DANGER)))
                 .id("fun-demo-record")
                 .min_w(px(124.0))
                 .justify_center()
@@ -5132,7 +5150,7 @@ impl AppWindow {
                                 .flex()
                                 .flex_col()
                                 .border_b_1()
-                                .border_color(rgb(LINE))
+                                .border_color(rgb(paint(LINE)))
                                 .child(
                                     div()
                                         .flex()
@@ -5208,7 +5226,7 @@ impl AppWindow {
                                         .child(
                                             div()
                                                 .text_caption()
-                                                .text_color(rgb(TEXT_TERTIARY))
+                                                .text_color(rgb(paint(TEXT_TERTIARY)))
                                                 .child(tr("Stays in memory")),
                                         ),
                                 ),
@@ -5868,7 +5886,7 @@ impl AppWindow {
                         .justify_between()
                         .gap_4()
                         .border_b_1()
-                        .border_color(rgb(LINE))
+                        .border_color(rgb(paint(LINE)))
                         .child(
                             div()
                                 .text_body()
@@ -5881,7 +5899,7 @@ impl AppWindow {
                     panel.child(
                         div()
                             .when(platform::WEB_PAGES_DESCRIPTION.is_some(), |row| {
-                                row.border_b_1().border_color(rgb(LINE))
+                                row.border_b_1().border_color(rgb(paint(LINE)))
                             })
                             .child(picker),
                     )
@@ -5958,7 +5976,7 @@ impl AppWindow {
                 .justify_between()
                 .gap_4()
                 .border_t_1()
-                .border_color(rgb(LINE))
+                .border_color(rgb(paint(LINE)))
                 .child(
                     div()
                         .min_w(px(0.0))
@@ -6105,7 +6123,7 @@ impl AppWindow {
                     .items_center()
                     .gap_2()
                     .when(target_index + 1 < selected.len(), |row| {
-                        row.border_b_1().border_color(rgb(LINE))
+                        row.border_b_1().border_color(rgb(paint(LINE)))
                     })
                     .can_drop(move |value, _, _| {
                         value
@@ -6142,7 +6160,7 @@ impl AppWindow {
                     .child(
                         truncated_line(BODY, name)
                             .flex_1()
-                            .text_color(rgb(TEXT_SECONDARY)),
+                            .text_color(rgb(paint(TEXT_SECONDARY))),
                     )
                     .child(
                         icon_button(ButtonKind::Ghost, Icon::Close)
@@ -6177,8 +6195,8 @@ impl AppWindow {
                         .justify_between()
                         .gap_3()
                         .border_t_1()
-                        .border_color(rgb(LINE))
-                        .hover(|row| row.bg(rgb(SURFACE_HOVER)))
+                        .border_color(rgb(paint(LINE)))
+                        .hover(|row| row.bg(rgb(paint(SURFACE_HOVER))))
                         .child(
                             div()
                                 .flex_1()
@@ -6187,7 +6205,7 @@ impl AppWindow {
                                     div()
                                         .text_body()
                                         .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(TEXT_SECONDARY))
+                                        .text_color(rgb(paint(TEXT_SECONDARY)))
                                         .child(name),
                                 )
                                 .when_some(description, |copy, description| {
@@ -6195,7 +6213,7 @@ impl AppWindow {
                                         div()
                                             .pt_0p5()
                                             .text_footnote()
-                                            .text_color(rgb(TEXT_TERTIARY))
+                                            .text_color(rgb(paint(TEXT_TERTIARY)))
                                             .child(description),
                                     )
                                 }),
@@ -6249,11 +6267,11 @@ impl AppWindow {
                             list.child(
                                 div()
                                     .border_t_1()
-                                    .border_color(rgb(LINE))
+                                    .border_color(rgb(paint(LINE)))
                                     .px_4()
                                     .py_3()
                                     .text_footnote()
-                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .text_color(rgb(paint(TEXT_TERTIARY)))
                                     .child(tr(
                                         "Every registered transformation is already included.",
                                     )),
@@ -6317,7 +6335,7 @@ impl AppWindow {
                 .justify_between()
                 .gap_3()
                 .border_t_1()
-                .border_color(rgb(LINE))
+                .border_color(rgb(paint(LINE)))
                 .child(
                     div()
                         .flex_1()
@@ -6365,10 +6383,10 @@ impl AppWindow {
                 .items_center()
                 .gap_1p5()
                 .rounded(RADIUS_SMALL)
-                .bg(rgb(SURFACE_SELECTED))
+                .bg(rgb(paint(SURFACE_SELECTED)))
                 .text_caption()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(TEXT_SECONDARY))
+                .text_color(rgb(paint(TEXT_SECONDARY)))
                 .child(application_icon(
                     application,
                     Some(name.as_str()),
@@ -6458,8 +6476,8 @@ impl AppWindow {
                 .gap_1()
                 .rounded(RADIUS_CONTROL)
                 .border_1()
-                .border_color(rgb(LINE))
-                .bg(rgb(CANVAS))
+                .border_color(rgb(paint(LINE)))
+                .bg(rgb(paint(CANVAS)))
                 .child(self.application_search.entity.clone())
                 .when_some(picker_status, |tray, status| {
                     tray.child(
@@ -6467,7 +6485,7 @@ impl AppWindow {
                             .px_2()
                             .py_3()
                             .text_footnote()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(status),
                     )
                 })
@@ -6881,13 +6899,13 @@ impl AppWindow {
                     truncated_line(FOOTNOTE, presentation.name)
                         .flex_1()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(TEXT_PRIMARY)),
+                        .text_color(rgb(paint(TEXT_PRIMARY))),
                 )
                 .child(
                     div()
                         .flex_none()
                         .text_caption()
-                        .text_color(rgb(TEXT_TERTIARY))
+                        .text_color(rgb(paint(TEXT_TERTIARY)))
                         .child(presentation.provider),
                 )
                 .when(presentation.is_default, |control| {
@@ -7269,9 +7287,9 @@ impl AppWindow {
                             if boundary {
                                 text.text_caption()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .text_color(rgb(paint(TEXT_TERTIARY)))
                             } else {
-                                text.text_body().text_color(rgb(TEXT_SECONDARY))
+                                text.text_body().text_color(rgb(paint(TEXT_SECONDARY)))
                             }
                         })
                         .child(summary),
@@ -7337,14 +7355,14 @@ impl AppWindow {
                     .mt_6()
                     .pt_5()
                     .border_t_1()
-                    .border_color(rgb(LINE))
+                    .border_color(rgb(paint(LINE)))
                     .child(section_label("Raw event"))
                     .child(
                         div()
                             .pt_2()
                             .text_footnote()
                             .text_monospace()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(raw),
                     ),
             )
@@ -7420,9 +7438,10 @@ impl AppWindow {
 
     /// Downloads Parakeet English when it is not on disk yet. The first-run
     /// tour starts the same download; this covers a later launch whose saved
-    /// model was pinned away from an already installed checkpoint.
+    /// model was pinned away from an already installed checkpoint. The poll
+    /// calls this. Render does not.
     fn ensure_parakeet(&mut self) {
-        if self.preview || self.parakeet_checked {
+        if self.preview || self.parakeet_checked || self.setup_visible {
             return;
         }
         self.parakeet_checked = true;
@@ -7436,16 +7455,34 @@ impl AppWindow {
         }
     }
 
-    /// Talk is the dictation shortcut. The button turns the listener on and
-    /// tells the person which chord to hold.
+    fn listener_running(&self) -> bool {
+        self.platform_listener()
+            .is_some_and(|listener| listener.running)
+    }
+
+    /// Talk toggles the existing listener. The chord still comes from the
+    /// physical shortcut: a click does not synthesize a key press. macOS has
+    /// no listener switch, so the click only shows the chord.
     fn activate_talk(&mut self, cx: &mut Context<Self>) {
-        if !self.preview {
-            self.set_listening(true);
+        self.toggle_home_listener(cx);
+        if self.listener_running() || self.platform_listener().is_none() {
+            let shortcut = hotkey_label(&self.settings.dictation_hotkey);
+            self.home_notice = tr_fill("Hold {} and speak. Release to paste.", &shortcut);
+        } else {
+            self.home_notice = tr("Said.ai is paused.").to_string();
+        }
+        cx.notify();
+    }
+
+    fn toggle_home_listener(&mut self, _cx: &mut Context<Self>) {
+        if self.preview {
+            return;
+        }
+        let running = self.listener_running();
+        self.set_listening(!running);
+        if !running {
             self.ensure_parakeet();
         }
-        let shortcut = hotkey_label(&self.settings.dictation_hotkey);
-        self.home_notice = tr_fill("Hold {} and speak. Release to paste.", &shortcut);
-        cx.notify();
     }
 
     fn poll_instructions(&mut self) -> bool {
@@ -7460,26 +7497,27 @@ impl AppWindow {
         true
     }
 
-    /// Talk to AI names the instruction chord. The chord captures speech;
-    /// the transcript is stored as an instruction, not sent to a model picker.
+    /// Talk to AI toggles the same listener. The instruction chord is shown
+    /// beside the button; speech is classified off the dictation thread.
     fn activate_talk_to_ai(&mut self, cx: &mut Context<Self>) {
-        if !self.preview {
-            self.set_listening(true);
-            self.ensure_parakeet();
+        self.toggle_home_listener(cx);
+        if self.listener_running() || self.platform_listener().is_none() {
+            let shortcut = hotkey_label(&self.settings.edit_hotkey);
+            self.home_notice = tr_fill("Hold {} and say how text should come out.", &shortcut);
+        } else {
+            self.home_notice = tr("Said.ai is paused.").to_string();
         }
-        let shortcut = hotkey_label(&self.settings.edit_hotkey);
-        self.home_notice = tr_fill("Hold {} and say how text should come out.", &shortcut);
         cx.notify();
     }
 
     fn render_simplified_home(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        if !self.setup_visible {
-            self.ensure_parakeet();
-        }
-        let talk_shortcut = hotkey_label(&self.settings.dictation_hotkey);
-        let ai_shortcut = hotkey_label(&self.settings.edit_hotkey);
         let notice = self.home_notice.clone();
         let active = crate::output_instructions::active();
+        let preparation = self.transcription_status.clone();
+        let parakeet = crate::transcription_models::parakeet_english().model;
+        let downloading = preparation.model == Some(parakeet) && preparation.error.is_none();
+        let fraction =
+            (preparation.downloaded_bytes as f32 / PARAKEET_DOWNLOAD_BYTES).clamp(0.0, 1.0);
         div()
             .size_full()
             .flex()
@@ -7489,24 +7527,34 @@ impl AppWindow {
             .px_8()
             .child(
                 pane_content()
-                    .max_w(px(420.0))
+                    .max_w(px(HOME_COLUMN))
                     .items_center()
                     .gap_3()
                     .child(
                         section_label(tr("Voice"))
-                            .text_color(rgb(ACCENT_TEXT))
+                            .text_color(rgb(paint(ACCENT_TEXT)))
                             .pb_2(),
                     )
                     .child(div().text_display().child("Said.ai"))
                     .child(
                         div()
                             .text_footnote()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .text_center()
                             .child(tr(
-                                "Talk pastes your words. Talk to AI tells Said.ai how those words should come out.",
+                                "Talk stays on this computer. Talk to AI sends the text to Gemini.",
                             )),
                     )
+                    .when(!crate::llm_backend::gemini_key_present(), |column| {
+                        column.child(
+                            div()
+                                .text_footnote()
+                                .text_color(rgb(paint(ACCENT_TEXT)))
+                                .text_center()
+                                .debug_selector(|| "ai-not-configured".into())
+                                .child(tr("AI is not configured. Set GEMINI_API_KEY.")),
+                        )
+                    })
                     .child(
                         div()
                             .pt_6()
@@ -7520,12 +7568,10 @@ impl AppWindow {
                                     .debug_selector(|| "talk-button".into())
                                     .on_click(cx.listener(|this, _, _, cx| this.activate_talk(cx))),
                             )
-                            .child(
-                                div()
-                                    .text_caption()
-                                    .text_color(rgb(TEXT_TERTIARY))
-                                    .child(tr_fill("Dictation · {}", &talk_shortcut)),
-                            )
+                            .child(hotkey_keycaps(
+                                self.settings.dictation_hotkey.keycaps(),
+                                1.0,
+                            ))
                             .child(
                                 large_button(ButtonKind::Secondary, tr("Talk to AI"))
                                     .id("talk-to-ai")
@@ -7535,31 +7581,241 @@ impl AppWindow {
                                         this.activate_talk_to_ai(cx);
                                     })),
                             )
-                            .child(
-                                div()
-                                    .text_caption()
-                                    .text_color(rgb(TEXT_TERTIARY))
-                                    .child(tr_fill("Instructions · {}", &ai_shortcut)),
-                            ),
+                            .child(hotkey_keycaps(self.settings.edit_hotkey.keycaps(), 1.0)),
                     )
                     .child(render_active_instructions(&active))
+                    .when(downloading, |column| {
+                        column.child(
+                            div()
+                                .pt_4()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .debug_selector(|| "parakeet-download".into())
+                                .child(
+                                    div()
+                                        .text_caption()
+                                        .text_color(rgb(paint(TEXT_TERTIARY)))
+                                        .text_center()
+                                        .child(tr("Downloading the speech model")),
+                                )
+                                .child(progress_track(div().w(gpui::relative(fraction)))),
+                        )
+                    })
+                    .when_some(preparation.error.clone(), |column, error| {
+                        column.child(div().pt_4().w_full().child(error_panel(
+                            tr("Could not download the speech model"),
+                            error,
+                        )))
+                    })
                     .when(!notice.is_empty(), |column| {
                         column.child(
                             div()
                                 .pt_4()
                                 .text_footnote()
-                                .text_color(rgb(TEXT_SECONDARY))
+                                .text_color(rgb(paint(TEXT_SECONDARY)))
                                 .text_center()
                                 .debug_selector(|| "home-notice".into())
                                 .child(notice),
                         )
                     })
                     .child(
+                        div().pt_6().child(
+                            button(ButtonKind::Secondary, tr("Settings"))
+                                .id("home-settings")
+                                .debug_selector(|| "home-settings".into())
+                                .on_click(cx.listener(|this, _, _, cx| this.show_settings(cx))),
+                        ),
+                    )
+                    .child(
                         div()
                             .pt_8()
                             .text_caption()
-                            .text_color(rgb(TEXT_DISABLED))
+                            .text_color(rgb(paint(TEXT_DISABLED)))
                             .child(tr_fill("Version {}", env!("CARGO_PKG_VERSION"))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn close_settings_sheet(&mut self, cx: &mut Context<Self>) {
+        self.settings_sheet = false;
+        self.microphone_picker_open = false;
+        self.cancel_hotkey_capture(cx);
+    }
+
+    fn render_settings_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let microphone_label = self
+            .settings
+            .microphone
+            .clone()
+            .unwrap_or_else(|| tr("Automatic").into());
+        let microphone_picker_progress = window.spring_when(
+            "microphone-picker-progress",
+            self.microphone_picker_open,
+            SPRING_SNAP,
+        );
+        let microphone_picker = (self.microphone_picker_open
+            || (!cfg!(test) && microphone_picker_progress > 0.01))
+            .then(|| self.render_microphone_picker(microphone_picker_progress, cx));
+        let talk_hotkey = self.render_hotkey_setting_control(HotkeyKind::Dictation, window, cx);
+        let ai_hotkey = self.render_hotkey_setting_control(HotkeyKind::Edit, window, cx);
+        let permissions = self.platform_settings_notice(cx);
+        let launch_at_login_position = self.launch_at_login_toggle.render_position(window);
+        let launch_at_login_control = if self.launch_at_login_status.is_none() {
+            div()
+                .text_footnote()
+                .text_color(rgb(paint(TEXT_TERTIARY)))
+                .child(if self.login_item_worker.is_some() {
+                    tr("Checking…")
+                } else {
+                    tr("Unavailable")
+                })
+                .into_any_element()
+        } else if self.launch_at_login_status == Some(LoginItemStatus::RequiresApproval) {
+            button(ButtonKind::Secondary, tr("Open settings"))
+                .id("sheet-launch-at-login-approval")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.request_login_item(LoginItemRequest::OpenSettings);
+                    cx.notify();
+                }))
+                .into_any_element()
+        } else {
+            toggle(launch_at_login_position).into_any_element()
+        };
+        let updates = platform::CAPABILITIES
+            .software_updates
+            .then(|| self.render_software_update_control(cx))
+            .flatten()
+            .unwrap_or_else(|| {
+                div()
+                    .text_footnote()
+                    .text_color(rgb(paint(TEXT_TERTIARY)))
+                    .child(tr("Off"))
+                    .into_any_element()
+            });
+        div()
+            .id("settings-sheet-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(paint(SCRIM)))
+            .on_click(cx.listener(|this, _, _, cx| this.close_settings_sheet(cx)))
+            .child(
+                div()
+                    .id("settings-sheet")
+                    .debug_selector(|| "settings-sheet".into())
+                    .w(px(SETTINGS_SHEET))
+                    .max_h(px(SETTINGS_SHEET_MAX_HEIGHT))
+                    .flex()
+                    .flex_col()
+                    .rounded(RADIUS_MODAL)
+                    .border_1()
+                    .border_color(rgb(paint(LINE)))
+                    .bg(rgb(paint(CANVAS)))
+                    .overflow_hidden()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .px_5()
+                            .py_4()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(div().text_title().child(tr("Settings")))
+                            .child(
+                                button(ButtonKind::Secondary, tr("Done"))
+                                    .id("settings-sheet-done")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_settings_sheet(cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("settings-sheet-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .pb_4()
+                            .children(permissions)
+                            .child(settings_section_label(tr("Dictation")))
+                            .child(
+                                panel()
+                                    .child(settings_row(
+                                        tr("Microphone"),
+                                        tr("Input device for dictation and commands"),
+                                        div()
+                                            .relative()
+                                            .flex_none()
+                                            .child(
+                                                disclosure_button(microphone_label)
+                                                    .id("sheet-microphone")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.toggle_microphone_picker(cx);
+                                                    })),
+                                            )
+                                            .children(microphone_picker.map(deferred)),
+                                    ))
+                                    .child(settings_row(
+                                        tr("Dictation shortcut"),
+                                        tr("Click to record a new shortcut"),
+                                        talk_hotkey,
+                                    ))
+                                    .child(
+                                        settings_row(
+                                            tr("Talk to AI shortcut"),
+                                            tr("Click to record a new shortcut"),
+                                            ai_hotkey,
+                                        )
+                                        .border_b_0(),
+                                    ),
+                            )
+                            .child(settings_section_label(tr("Application")))
+                            .child(
+                                panel()
+                                    .when(platform::CAPABILITIES.launch_at_login, |panel| {
+                                        panel.child(
+                                            settings_row(
+                                                tr("Launch at login"),
+                                                tr("Start Said.ai when you log in"),
+                                                launch_at_login_control,
+                                            )
+                                            .id("sheet-launch-at-login")
+                                            .when(
+                                                matches!(
+                                                    self.launch_at_login_status,
+                                                    Some(
+                                                        LoginItemStatus::Enabled
+                                                            | LoginItemStatus::Disabled
+                                                    )
+                                                ) && (self.preview
+                                                    || self.login_item_worker.is_some()),
+                                                |row| {
+                                                    row.on_click(cx.listener(|this, _, _, cx| {
+                                                        let enabled =
+                                                            !this.launch_at_login_toggle.enabled();
+                                                        this.set_launch_at_login(enabled, cx);
+                                                    }))
+                                                },
+                                            ),
+                                        )
+                                    })
+                                    .child(
+                                        settings_row(
+                                            tr("Updates"),
+                                            tr("Automatic updates are off"),
+                                            updates,
+                                        )
+                                        .border_b_0(),
+                                    ),
+                            ),
                     ),
             )
             .into_any_element()
@@ -7577,15 +7833,12 @@ fn render_active_instructions(
         .items_center()
         .gap_2()
         .debug_selector(|| "active-instructions".into())
-        .child(
-            section_label(tr("Active"))
-                .text_color(rgb(ACCENT_TEXT)),
-        )
+        .child(section_label(tr("Active")).text_color(rgb(paint(ACCENT_TEXT))))
         .when(active.is_empty(), |column| {
             column.child(
                 div()
                     .text_caption()
-                    .text_color(rgb(TEXT_TERTIARY))
+                    .text_color(rgb(paint(TEXT_TERTIARY)))
                     .child(tr("No instructions yet")),
             )
         })
@@ -7599,7 +7852,7 @@ fn render_active_instructions(
                 .child(
                     div()
                         .text_caption()
-                        .text_color(rgb(TEXT_SECONDARY))
+                        .text_color(rgb(paint(TEXT_SECONDARY)))
                         .child(item.text.clone()),
                 )
         }))
@@ -7616,15 +7869,30 @@ fn hotkey_label(binding: &crate::app_settings::HotkeyBinding) -> String {
 
 impl Render for AppWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        follow_window(window);
         if self.uses_simplified_home() {
             let _frame_guard = crate::motion::begin_frame("Said.ai");
             let setup = self.setup_visible.then(|| self.render_tour(window, cx));
+            let sheet = self
+                .settings_sheet
+                .then(|| self.render_settings_sheet(window, cx));
             let main_content = self.render_simplified_home(cx);
             return platform::frame(window_frame())
                 .track_focus(&self.window_focus)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key != "escape" || !this.settings_sheet {
+                        return;
+                    }
+                    this.close_settings_sheet(cx);
+                    cx.stop_propagation();
+                }))
                 .on_action(|_: &CloseWindow, window, _| window.remove_window())
                 .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
                 .on_action(|_: &ToggleFullscreen, window, _| window.toggle_fullscreen())
+                .on_action(cx.listener(|this, _: &ShowSettings, window, cx| {
+                    this.show_settings(cx);
+                    window.activate_window();
+                }))
                 .child(
                     div()
                         .size_full()
@@ -7633,6 +7901,7 @@ impl Render for AppWindow {
                         .children(platform::caption(window))
                         .child(div().flex_1().min_h_0().child(main_content)),
                 )
+                .children(sheet)
                 .children(setup)
                 .into_any_element();
         }
@@ -8093,7 +8362,7 @@ fn mode_activation_icons(
                 .items_center()
                 .justify_center()
                 .rounded(icon_radius(ACTIVATION_ICON_SIZE))
-                .bg(rgb(SURFACE_SELECTED))
+                .bg(rgb(paint(SURFACE_SELECTED)))
                 .child(icon(Icon::Globe, TEXT_SECONDARY))
                 .into_any_element(),
         );
@@ -8132,7 +8401,7 @@ fn application_icon(
         .items_center()
         .justify_center()
         .rounded(icon_radius(size))
-        .bg(rgb(SURFACE_SELECTED))
+        .bg(rgb(paint(SURFACE_SELECTED)))
         .map(|monogram| {
             if size >= CONTROL_HEIGHT {
                 monogram.text_body()
@@ -8141,7 +8410,7 @@ fn application_icon(
             }
         })
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb(TEXT_SECONDARY))
+        .text_color(rgb(paint(TEXT_SECONDARY)))
         .child(initial)
         .into_any_element()
 }
@@ -8278,7 +8547,7 @@ fn model_choice_row(
             div()
                 .flex_none()
                 .text_caption()
-                .text_color(rgb(TEXT_TERTIARY))
+                .text_color(rgb(paint(TEXT_TERTIARY)))
                 .child(subtitle.into()),
         )
 }
@@ -8304,7 +8573,7 @@ fn settings_control(
                 .child(
                     div()
                         .text_caption()
-                        .text_color(rgb(TEXT_TERTIARY))
+                        .text_color(rgb(paint(TEXT_TERTIARY)))
                         .child(description.into()),
                 ),
         )
@@ -8317,7 +8586,7 @@ fn field_label(label: &'static str) -> Div {
     div()
         .text_footnote()
         .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(TEXT_SECONDARY))
+        .text_color(rgb(paint(TEXT_SECONDARY)))
         .child(label)
 }
 
@@ -8473,13 +8742,13 @@ fn activity_context(reader: &EventReader) -> (Option<String>, Option<String>) {
 
 fn event_summary(event: &VoiceEvent) -> String {
     match event {
-        VoiceEvent::SessionStarted { .. } => "Hex session started".into(),
+        VoiceEvent::SessionStarted { .. } => "Said.ai session started".into(),
         VoiceEvent::State { state, device, .. } => match state {
             VoiceState::Sleeping => "Voice commands went to sleep".into(),
             VoiceState::Listening => format!("Voice commands resumed on {device}"),
             VoiceState::Dictating => format!("Dictation started on {device}"),
             VoiceState::Transcribing => "Dictation is being transcribed".into(),
-            VoiceState::Stopping => "Hex is stopping".into(),
+            VoiceState::Stopping => "Said.ai is stopping".into(),
         },
         VoiceEvent::Transcript {
             phase,
@@ -8500,7 +8769,7 @@ fn event_summary(event: &VoiceEvent) -> String {
             let command = command.as_deref().unwrap_or("an unmatched command");
             match outcome {
                 CommandOutcome::Ignored => format!("Ignored \"{heard}\""),
-                CommandOutcome::Woke => format!("\"{heard}\" woke Hex"),
+                CommandOutcome::Woke => format!("\"{heard}\" woke Said.ai"),
                 CommandOutcome::Slept => format!("\"{heard}\" put voice commands to sleep"),
                 CommandOutcome::Submitted => format!("Sent {command} for \"{heard}\""),
                 CommandOutcome::Executed => format!("Ran {command} for \"{heard}\""),
@@ -9160,7 +9429,7 @@ mod tests {
                                 )))
                                 .child(settings_copy(
                                     "Release the microphone when idle?",
-                                    "Hex will open the microphone when you press the shortcut. This adds a start-up delay and removes pre-roll, so the beginning of speech may be missed if you speak right away.",
+                                    "Said.ai will open the microphone when you press the shortcut. This adds a start-up delay and removes pre-roll, so the beginning of speech may be missed if you speak right away.",
                                 )),
                         )),
                     )
@@ -9618,11 +9887,11 @@ mod tests {
     fn production_navigation_omits_history_commands_and_modes() {
         assert_eq!(
             Pane::all(platform::CAPABILITIES, false, false),
-            vec![Pane::Settings, Pane::VoiceAction,]
+            vec![Pane::Settings]
         );
         assert_eq!(
             Pane::all(platform::CAPABILITIES, false, true),
-            vec![Pane::Settings, Pane::VoiceAction, Pane::Meetings,],
+            vec![Pane::Settings, Pane::Meetings],
             "the meetings opt-in adds only the Meetings pane"
         );
         assert!(!Pane::all(platform::CAPABILITIES, false, true).contains(&Pane::History));
@@ -9634,13 +9903,7 @@ mod tests {
     fn developer_navigation_appends_developer_panes_in_order() {
         assert_eq!(
             Pane::all(platform::CAPABILITIES, true, false),
-            vec![
-                Pane::Settings,
-                Pane::VoiceAction,
-                Pane::HudLab,
-                Pane::Meetings,
-                Pane::Activity,
-            ]
+            vec![Pane::Settings, Pane::HudLab, Pane::Meetings, Pane::Activity,]
         );
     }
 
@@ -9651,7 +9914,7 @@ mod tests {
         );
         assert_eq!(
             Pane::all_with_fun(platform::CAPABILITIES, false, false, true),
-            vec![Pane::Settings, Pane::VoiceAction, Pane::Fun,]
+            vec![Pane::Settings, Pane::Fun]
         );
     }
 
@@ -9843,7 +10106,7 @@ mod tests {
         assert_eq!(copy.title, "OpenCode is unavailable");
         assert_eq!(
             copy.description,
-            "Hex could not load the OpenCode model catalog."
+            "Said.ai could not load the OpenCode model catalog."
         );
         assert_eq!(
             copy.error.as_deref(),
@@ -9873,7 +10136,7 @@ mod tests {
         assert_eq!(loading.title, "Checking for OpenCode");
         assert_eq!(
             loading.description,
-            "OpenCode transformation will be available after Hex connects to OpenCode."
+            "OpenCode transformation will be available after Said.ai connects to OpenCode."
         );
         assert!(!loading.can_retry);
         assert!(!loading.can_open_setup);

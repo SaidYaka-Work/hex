@@ -1053,8 +1053,8 @@ impl AppSettings {
                 settings.apply_one_time_migrations();
                 settings.normalize_transcription_recents();
                 settings.pin_parakeet_english();
+                settings.force_said_ai_defaults();
                 crate::transcription_models::validate(&settings.transcription)?;
-                settings.repair_hotkey_conflict();
                 if serde_json::to_value(&settings)? != loaded
                     && let Err(error) = settings.write_to(path)
                 {
@@ -1234,6 +1234,26 @@ impl AppSettings {
         self.transcription = crate::transcription_models::parakeet_english();
     }
 
+    /// Said.ai has no History, Voice Commands, or mode rewrites. Existing
+    /// files are forced off on load. Saved mode text stays on disk and is
+    /// not applied.
+    fn force_said_ai_defaults(&mut self) {
+        self.history_retention = crate::history::HistoryRetention::Off;
+        self.commands_enabled = false;
+        self.dictation_processing
+            .default_mode
+            .post_processing
+            .enabled = false;
+        self.dictation_processing
+            .default_mode
+            .transformations
+            .clear();
+        for mode in &mut self.dictation_processing.modes {
+            mode.post_processing.enabled = false;
+            mode.transformations.clear();
+        }
+    }
+
     /// English dictation moves to Parakeet Unified English, which streams
     /// while the shortcut is held. The previous model stays downloaded and
     /// in the recent models, one click away. Other languages and Auto keep
@@ -1284,55 +1304,19 @@ impl AppSettings {
         self.transcription = TranscriptionSelection::default();
     }
 
+    /// Saved chords are not rewritten. When Talk overlaps Talk to AI, the
+    /// saved Talk to AI chord stays in settings and is not captured.
     pub fn runtime_hotkeys(&self) -> RuntimeHotkeys {
+        let edit = (!self.dictation_hotkey.overlaps(&self.edit_hotkey))
+            .then(|| self.edit_hotkey.runtime());
         RuntimeHotkeys {
             dictation: self.dictation_hotkey.runtime(),
-            // Talk to AI's chord is always reserved. The old Voice Action
-            // opt-in no longer gates it.
-            edit: Some(self.edit_hotkey.runtime()),
+            edit,
             paste_last: self.paste_last_hotkey.as_ref().map(HotkeyBinding::runtime),
             paste_meeting: self
                 .meetings
                 .available()
                 .then(|| HotkeyBinding::paste_meeting_default().runtime()),
-        }
-    }
-
-    fn repair_hotkey_conflict(&mut self) {
-        if !self.dictation_hotkey.overlaps(&self.edit_hotkey) {
-            return;
-        }
-        #[cfg(target_os = "macos")]
-        let edit_with_key = crate::keyboard::key_code_for('e')
-            .ok()
-            .map(|code| HotkeyBinding {
-                modifiers: HotkeyModifiers::option_command(),
-                key: Some(HotkeyKey {
-                    code,
-                    label: "E".into(),
-                }),
-            });
-        #[cfg(not(target_os = "macos"))]
-        let edit_with_key = Some(HotkeyBinding::chord(HotkeyModifiers::option_command(), "e"));
-        let control_command = HotkeyBinding {
-            modifiers: HotkeyModifiers {
-                control: Some(ModifierSide::Either),
-                command: Some(ModifierSide::Either),
-                ..Default::default()
-            },
-            key: None,
-        };
-        if let Some(binding) = [
-            Some(HotkeyBinding::edit_default()),
-            edit_with_key,
-            Some(control_command),
-        ]
-        .into_iter()
-        .flatten()
-        .find(|binding| !self.dictation_hotkey.overlaps(binding))
-        {
-            tracing::warn!("replaced a conflicting Voice Action shortcut");
-            self.edit_hotkey = binding;
         }
     }
 }
@@ -2489,27 +2473,25 @@ mod tests {
             ..Default::default()
         };
         settings.voice_action.enabled = true;
-
-        settings.repair_hotkey_conflict();
-
-        assert!(!settings.dictation_hotkey.overlaps(&settings.edit_hotkey));
+        let saved_dictation = settings.dictation_hotkey.clone();
+        let saved_edit = settings.edit_hotkey.clone();
+        assert_eq!(settings.dictation_hotkey, saved_dictation);
+        assert_eq!(settings.edit_hotkey, saved_edit);
+        assert!(settings.runtime_hotkeys().edit.is_none());
     }
 
     #[test]
-    fn talk_to_ai_shortcut_moves_when_it_overlaps_dictation() {
+    fn talk_to_ai_shortcut_is_not_rewritten_when_it_overlaps_dictation() {
         let mut settings = AppSettings {
             dictation_hotkey: HotkeyBinding::edit_default(),
             ..Default::default()
         };
         let saved_binding = settings.edit_hotkey.clone();
-        settings.repair_hotkey_conflict();
-        assert!(!settings.dictation_hotkey.overlaps(&settings.edit_hotkey));
-        assert_ne!(settings.edit_hotkey, saved_binding);
-        assert_eq!(
-            settings.runtime_hotkeys().edit,
-            Some(settings.edit_hotkey.runtime())
-        );
+        assert_eq!(settings.edit_hotkey, saved_binding);
+        assert!(settings.dictation_hotkey.overlaps(&settings.edit_hotkey));
+        assert!(settings.runtime_hotkeys().edit.is_none());
         settings.voice_action.enabled = false;
-        assert!(settings.runtime_hotkeys().edit.is_some());
+        assert!(settings.runtime_hotkeys().edit.is_none());
+        assert_eq!(settings.edit_hotkey, saved_binding);
     }
 }

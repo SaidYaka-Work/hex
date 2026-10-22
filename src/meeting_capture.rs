@@ -315,7 +315,7 @@ impl ProcessTapSource {
                 CATapDescription::alloc(),
                 &excluded,
             );
-            description.setName(&NSString::from_str("Hex meeting system audio"));
+            description.setName(&NSString::from_str("Said.ai meeting system audio"));
             description.setPrivate(true);
             description.setMuteBehavior(CATapMuteBehavior::Unmuted);
             description
@@ -553,7 +553,7 @@ fn create_tap_aggregate(tap_uid: &NSString) -> Result<AudioObjectID> {
                 &*key(kAudioAggregateDeviceTapListKey),
             ],
             &[
-                object(NSString::from_str("Hex Meeting System Audio")),
+                object(NSString::from_str("Said.ai Meeting System Audio")),
                 object(NSString::from_str(&uid)),
                 object(NSNumber::new_bool(true)),
                 object(NSNumber::new_bool(true)),

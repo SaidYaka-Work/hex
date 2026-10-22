@@ -37,6 +37,7 @@ enum OutputJob {
     Dictation(Job),
     VoiceAction(Job),
     PasteLast,
+    DeferredPaste(String),
 }
 
 #[derive(Clone, Copy)]
@@ -68,7 +69,6 @@ pub struct WindowsDictationConfig {
     pub history: Option<crate::history::History>,
     pub last_dictation: Arc<Mutex<Option<String>>>,
     pub indicator: Option<crate::windows_indicator::WindowsIndicatorSender>,
-    pub mode_runtime: Arc<RwLock<crate::dictation_modes::ModeRuntime>>,
     pub transformations: Arc<crate::personal_commands::TransformationClient>,
     pub voice_action_model: Arc<RwLock<Option<crate::dictation_processor::Model>>>,
     pub fallback_to_default_device: bool,
@@ -96,9 +96,6 @@ impl WindowsDictationConfig {
             history: None,
             last_dictation: Arc::new(Mutex::new(None)),
             indicator: None,
-            mode_runtime: Arc::new(RwLock::new(
-                crate::dictation_modes::ModeRuntime::from_settings(settings),
-            )),
             transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
             voice_action_model: Arc::new(RwLock::new(voice_action_model(settings))),
             fallback_to_default_device: true,
@@ -149,9 +146,8 @@ pub fn run_with_transcriber(
         history,
         last_dictation,
         indicator,
-        mode_runtime,
         transformations,
-        voice_action_model,
+        voice_action_model: _voice_action_model,
         fallback_to_default_device,
     } = config;
     let _indicator_guard = IndicatorGuard(indicator.clone());
@@ -209,6 +205,9 @@ pub fn run_with_transcriber(
     let engine = TranscriptionEngine::start(transcriber)?;
     let mut finishing: Option<Finishing> = None;
     let (jobs, job_receiver) = mpsc::sync_channel::<OutputJob>(2);
+    let jobs_for_ai = jobs.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
     let (result_sender, results) = mpsc::channel();
     let worker = thread::Builder::new()
         .name("windows-dictation-output".into())
@@ -221,11 +220,28 @@ pub fn run_with_transcriber(
                         &mut paster,
                         history.as_ref(),
                         &last_dictation,
-                        &mode_runtime,
                         transformations.as_ref(),
+                        worker_stop.load(Ordering::Acquire),
                     ),
-                    OutputJob::VoiceAction(job) => {
-                        process_voice_action_job(job, &mut paster, &voice_action_model)
+                    OutputJob::VoiceAction(job) => process_voice_action_job(
+                        job,
+                        &mut paster,
+                        jobs_for_ai.clone(),
+                        Arc::clone(&worker_stop),
+                    ),
+                    OutputJob::DeferredPaste(text) => {
+                        let result = paster
+                            .as_mut()
+                            .map_err(|error| format!("{error:#}"))
+                            .and_then(|paster| {
+                                paster.paste(&text).map_err(|error| format!("{error:#}"))
+                            });
+                        JobResult {
+                            kind: OutputKind::VoiceAction,
+                            text: result.as_ref().ok().map(|_| text),
+                            latency_ms: 0,
+                            result: result.map(|_| ()),
+                        }
                     }
                     OutputJob::PasteLast => process_paste_last(&mut paster, &last_dictation),
                 };
@@ -252,7 +268,7 @@ pub fn run_with_transcriber(
     })?;
     emit_state(&mut events, VoiceState::Listening, &device_label)?;
     println!(
-        "Hex is ready on {}. Hold {} to dictate, release to paste; Escape cancels; Ctrl-C stops.",
+        "Said.ai is ready on {}. Hold {} to dictate, release to paste; Escape cancels; Ctrl-C stops.",
         device_label, hotkey_label
     );
 
@@ -726,6 +742,7 @@ pub fn run_with_transcriber(
     emit_state(&mut events, VoiceState::Stopping, &device_label)?;
     drop(hotkey);
     drop(input);
+    stop.store(true, Ordering::Release);
     drop(jobs);
     // Accepted jobs still wait on the engine, so it stops after them.
     if worker.join().is_err() {
@@ -743,8 +760,8 @@ fn process_dictation_job(
     paster: &mut Result<WindowsPaster>,
     history: Option<&crate::history::History>,
     last_dictation: &Mutex<Option<String>>,
-    _mode_runtime: &RwLock<crate::dictation_modes::ModeRuntime>,
     _transformations: &crate::personal_commands::TransformationClient,
+    cancelled: bool,
 ) -> JobResult {
     let started = Instant::now();
     // The context read starts now so the UIA walk overlaps inference.
@@ -766,7 +783,10 @@ fn process_dictation_job(
         if raw_text.is_empty() {
             return Err("transcription was empty".into());
         }
-        let text = crate::output_instructions::finish_talk(&raw_text);
+        let text = crate::output_instructions::finish_talk_unless_cancelled(&raw_text, cancelled);
+        if cancelled || text.is_empty() {
+            return Err("dictation was cancelled".into());
+        }
         let processed = crate::dictation_processor::Processed {
             text: text.clone(),
             observation: None,
@@ -812,7 +832,8 @@ fn process_dictation_job(
 fn process_voice_action_job(
     job: Job,
     paster: &mut Result<WindowsPaster>,
-    _voice_action_model: &RwLock<Option<crate::dictation_processor::Model>>,
+    jobs: SyncSender<OutputJob>,
+    stop: Arc<AtomicBool>,
 ) -> JobResult {
     let started = Instant::now();
     let transcription = job.transcript.wait().map(|transcribed| transcribed.text);
@@ -825,13 +846,14 @@ fn process_voice_action_job(
             tracing::warn!(%error, "could not copy the selection for the voice action");
             None
         });
-        let outcome = crate::output_instructions::accept(&instruction, selected.as_deref());
-        if let Some(reply) = outcome.paste.filter(|text| !text.trim().is_empty()) {
-            paster
-                .paste(&reply)
-                .map_err(|error| format!("{error:#}"))?;
-            return Ok(reply);
-        }
+        crate::output_instructions::enqueue(
+            instruction,
+            selected,
+            Arc::new(move || stop.load(Ordering::Acquire)),
+            move |text| {
+                let _ = jobs.send(OutputJob::DeferredPaste(text));
+            },
+        );
         Ok(String::new())
     });
     match result {

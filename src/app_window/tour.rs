@@ -225,7 +225,7 @@ impl AppWindow {
             .top_0()
             .left_0()
             .size_full()
-            .bg(rgb(CANVAS))
+            .bg(rgb(paint(CANVAS)))
             .flex()
             .flex_col()
             .items_center()
@@ -254,7 +254,7 @@ impl AppWindow {
             Step::Setup => Some((tr("Continue"), view.ready)),
             Step::TryIt if view.practice == Practice::Landed => Some((tr("Continue"), true)),
             Step::TryIt => None,
-            Step::Done => Some((tr("Start using Hex"), true)),
+            Step::Done => Some((tr("Start using Said.ai"), true)),
         };
         // Until setup is ready, the next setup row carries the screen's
         // accent, so Continue waits as a disabled neutral button.
@@ -349,9 +349,9 @@ impl AppWindow {
             art,
             tr("Welcome to Said.ai"),
             if platform::CAPABILITIES.permissions {
-                tr("Hold a key, say what you mean, and Hex types it wherever your cursor is. Your voice is transcribed on this Mac.")
+                tr("Hold a key, say what you mean, and Said.ai types it wherever your cursor is. Your voice is transcribed on this Mac.")
             } else {
-                tr("Hold a key, say what you mean, and Hex types it wherever your cursor is. Your voice is transcribed on this computer.")
+                tr("Hold a key, say what you mean, and Said.ai types it wherever your cursor is. Your voice is transcribed on this computer.")
             }
             .into(),
         )
@@ -375,18 +375,18 @@ impl AppWindow {
             .gap_6()
             .child(page_title(
                 if permissions {
-                    tr("Let Hex hear you and type for you")
+                    tr("Let Said.ai hear you and type for you")
                 } else {
                     tr("Download a speech model")
                 },
                 (!permissions).then(|| {
-                    tr("Hex transcribes on this computer, so it needs a local model first.").into()
+                    tr("Said.ai transcribes on this computer, so it needs a local model first.").into()
                 }),
             ))
             .child(panel().children(rows))
             .when(self.tour_relaunch_failed, |page| {
                 page.child(notice(tr(
-                    "Quit and reopen Hex to finish setup. macOS applies some permissions only after a restart.",
+                    "Quit and reopen Said.ai to finish setup. macOS applies some permissions only after a restart.",
                 )))
             })
             .into_any_element()
@@ -401,12 +401,12 @@ impl AppWindow {
                 tr("Microphone"),
                 match row.status {
                     ItemStatus::Denied => {
-                        tr("Turned off earlier. Switch Hex on in System Settings.").into()
+                        tr("Turned off earlier. Switch Said.ai on in System Settings.").into()
                     }
                     ItemStatus::Waiting
                         if self.setup_status.microphone == PermissionState::NeedsSettings =>
                     {
-                        tr("Switch Hex on in the list").into()
+                        tr("Switch Said.ai on in the list").into()
                     }
                     _ => tr("Hears you only while you hold the shortcut").into(),
                 },
@@ -415,7 +415,7 @@ impl AppWindow {
                 Icon::Keyboard,
                 tr("Input Monitoring"),
                 if waiting {
-                    tr("Drag Hex into the list, or switch it on if it is there").into()
+                    tr("Drag Said.ai into the list, or switch it on if it is there").into()
                 } else {
                     tr("Notices the shortcut in every app").into()
                 },
@@ -424,7 +424,7 @@ impl AppWindow {
                 Icon::Accessibility,
                 platform::accessibility_title(),
                 if waiting {
-                    tr("Drag Hex into the list, or switch it on if it is there").into()
+                    tr("Drag Said.ai into the list, or switch it on if it is there").into()
                 } else {
                     tr("Pastes your words into the app you are using").into()
                 },
@@ -464,7 +464,7 @@ impl AppWindow {
             .flex()
             .items_center()
             .gap_3()
-            .when(!last, |row| row.border_b_1().border_color(rgb(LINE)))
+            .when(!last, |row| row.border_b_1().border_color(rgb(paint(LINE))))
             .child(badge)
             .child(
                 div()
@@ -482,7 +482,7 @@ impl AppWindow {
                     .child(
                         div()
                             .text_footnote()
-                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_color(rgb(paint(TEXT_TERTIARY)))
                             .child(description),
                     ),
             )
@@ -635,11 +635,11 @@ impl AppWindow {
                 .justify_between()
                 .gap_3()
                 .child(hint_text(
-                    tr("Hex needs to reopen before it can hear the shortcut."),
+                    tr("Said.ai needs to reopen before it can hear the shortcut."),
                     TEXT_SECONDARY,
                 ))
                 .child(
-                    small_button(ButtonKind::Secondary, tr("Reopen Hex"))
+                    small_button(ButtonKind::Secondary, tr("Reopen Said.ai"))
                         .id("tour-reopen")
                         .on_click(cx.listener(|this, _, _, cx| this.tour_input(Input::Reopen, cx))),
                 )
@@ -647,7 +647,7 @@ impl AppWindow {
         }
         if !view.dictation_ready {
             return hint_text(
-                tr("Hex starts listening once the speech model has downloaded."),
+                tr("Said.ai starts listening once the speech model has downloaded."),
                 TEXT_TERTIARY,
             )
             .into_any_element();
@@ -694,7 +694,7 @@ impl AppWindow {
             ),
             Practice::NothingHeard => (
                 None,
-                tr("Hex did not catch any words. Speak a little closer, or pick another microphone in Settings.").into(),
+                tr("Said.ai did not catch any words. Speak a little closer, or pick another microphone in Settings.").into(),
                 TEXT_SECONDARY,
             ),
             Practice::Failed => (
@@ -709,7 +709,7 @@ impl AppWindow {
                     .gap_2()
                     .child(icon(Icon::Check, SUCCESS))
                     .child(hint_text(
-                        tr("That's it. Hex pastes wherever your cursor is, in any app."),
+                        tr("That's it. Said.ai pastes wherever your cursor is, in any app."),
                         SUCCESS,
                     ))
                     .into_any_element();
@@ -752,7 +752,7 @@ impl AppWindow {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgb(SUCCESS_SURFACE))
+            .bg(rgb(paint(SUCCESS_SURFACE)))
             .child(icon_at(Icon::Check, HERO_ICON_SIZE, SUCCESS));
         let art = div()
             .h(px(ONBOARDING_ART_HEIGHT))
@@ -806,7 +806,7 @@ impl AppWindow {
                     .items_center()
                     .gap_3()
                     .when(index + 1 < count, |row| {
-                        row.border_b_1().border_color(rgb(LINE))
+                        row.border_b_1().border_color(rgb(paint(LINE)))
                     })
                     .child(
                         div()
@@ -824,7 +824,7 @@ impl AppWindow {
                             .child(
                                 div()
                                     .text_footnote()
-                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .text_color(rgb(paint(TEXT_TERTIARY)))
                                     .child(description),
                             ),
                     )
@@ -841,17 +841,17 @@ impl AppWindow {
                 tr("You're all set"),
                 Some(if cfg!(target_os = "windows") {
                     tr_fill(
-                        "Hex waits in the system tray. Use {} in any app to dictate.",
+                        "Said.ai waits in the system tray. Use {} in any app to dictate.",
                         &self.shortcut_label(),
                     )
                 } else if cfg!(target_os = "linux") {
                     tr_fill(
-                        "Hex keeps running after you close this window. Use {} in any app to dictate.",
+                        "Said.ai keeps running after you close this window. Use {} in any app to dictate.",
                         &self.shortcut_label(),
                     )
                 } else {
                     tr_fill(
-                        "Hex waits in the menu bar. Use {} in any app to dictate.",
+                        "Said.ai waits in the menu bar. Use {} in any app to dictate.",
                         &self.shortcut_label(),
                     )
                 }),
@@ -938,7 +938,7 @@ fn page_title(title: &'static str, body: Option<String>) -> Div {
                 div()
                     .max_w(px(ONBOARDING_BODY_WIDTH))
                     .text_body()
-                    .text_color(rgb(TEXT_SECONDARY))
+                    .text_color(rgb(paint(TEXT_SECONDARY)))
                     .text_center()
                     .child(body),
             )
@@ -985,9 +985,9 @@ pub(super) fn permission_control(
             .items_center()
             .gap_3()
             .child(if crate::onboarding::reduce_motion() {
-                status_dot(ACCENT).into_any_element()
+                status_dot(paint(ACCENT)).into_any_element()
             } else {
-                status_dot(ACCENT)
+                status_dot(paint(ACCENT))
                     .with_animation(
                         "permission-waiting",
                         Animation::new(LISTENING_LOOP)
@@ -1012,7 +1012,7 @@ fn allowed(text: &'static str) -> AnyElement {
         .items_center()
         .gap_1p5()
         .text_footnote()
-        .text_color(rgb(SUCCESS))
+        .text_color(rgb(paint(SUCCESS)))
         .child(icon(Icon::Check, SUCCESS))
         .child(text)
         .into_any_element()
@@ -1026,11 +1026,11 @@ fn download_progress(progress: f32) -> AnyElement {
         .gap_2()
         // The tour sits on the canvas the track is drawn in, so the track
         // takes the line colour to stay visible.
-        .child(progress_track(div().w(gpui::relative(progress))).bg(rgb(LINE)))
+        .child(progress_track(div().w(gpui::relative(progress))).bg(rgb(paint(LINE))))
         .child(
             div()
                 .text_caption()
-                .text_color(rgb(TEXT_SECONDARY))
+                .text_color(rgb(paint(TEXT_SECONDARY)))
                 .child(format!("{:.0}%", progress * 100.0)),
         )
         .into_any_element()
@@ -1048,7 +1048,7 @@ fn notice(text: &'static str) -> Div {
         .px_4()
         .py_3()
         .text_footnote()
-        .text_color(rgb(TEXT_SECONDARY))
+        .text_color(rgb(paint(TEXT_SECONDARY)))
         .child(text)
 }
 
@@ -1078,7 +1078,7 @@ fn listening_art(parts: Vec<String>, phase: f32) -> Div {
             .size(px(size))
             .rounded_full()
             .border_1()
-            .border_color(rgb(ACCENT_BORDER))
+            .border_color(rgb(paint(ACCENT_BORDER)))
             .opacity(opacity)
     });
     div()

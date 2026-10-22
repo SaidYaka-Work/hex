@@ -1,10 +1,12 @@
-# Hex Design System
+# Said.ai Design System
 
 The GPUI desktop app is built from two modules. The running window is the
 Said.ai home (Talk and Talk to AI) on the paper palette sampled from
-saidyaka.com: warm canvas, white cards, near-black ink, terracotta labels,
-serif headlines, and pill buttons. Preview fixtures still draw the previous
-panes with the same tokens.
+saidyaka.com: warm canvas, white cards, near-black ink, and a terracotta
+accent (`#b4532a`, `#e8a87c` when the system is dark). Buttons are pills.
+Rows, menus, and inputs use a smaller corner. Instrument Serif and Instrument
+Sans are bundled. Preview fixtures still draw the previous panes with the
+same tokens.
 
 - [`src/design_tokens.rs`](../src/design_tokens.rs) holds every raw value:
   colours, the type scale, spacing, radii, and control geometry.
@@ -33,7 +35,7 @@ outside the system: its glossy capsule is hand-tuned in HUD Lab.
 3. **Five type steps.** Pick a step by role, not by look. Don't set weights a
    step already owns.
 4. **Sentence case, one name.** Labels, buttons, section labels, and titles use
-   sentence case. The product is "Hex" everywhere in the UI.
+   sentence case. The product is "Said.ai" everywhere in the UI.
 5. **One icon set.** Use `Icon` / `NavigationIcon`: line-weight SF Symbols at
    medium weight on macOS, never `.fill` variants. Never draw an icon with text
    glyphs or letters.
@@ -241,7 +243,7 @@ Meeting capsules are pill-shaped. They use the shared buttons with
 - Sentence case for every label, button, title, and section label:
   "Open settings", "Stop & transcribe", "Permissions needed". Proper nouns keep
   their capitals: Hex, OpenCode, Apple Intelligence, Finder, Zoom.
-- One product name: "Hex". Never "HEX" in UI strings, window titles, or menus.
+- One product name: "Said.ai". Never "HEX" in UI strings, window titles, or menus.
   File and artifact names (`HEX.app`, `HEX-<version>…`) and `HEX_*` environment
   variables are identifiers, not copy.
 - Use "…" (one character) for ellipses, for both progress ("Saving…") and for

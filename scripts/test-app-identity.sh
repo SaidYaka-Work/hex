@@ -10,10 +10,11 @@ mkdir -p "$bundle/Contents"
 plist="$bundle/Contents/Info.plist"
 cp "$root/app/Info.plist" "$plist"
 
-[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = com.kitlangton.hex2 ]
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = com.saidyaka.said ]
 [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")" = hex ]
-[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$plist")" = Hex ]
-[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$plist")" = Hex ]
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$plist")" = Said.ai ]
+[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$plist")" = Said.ai ]
+[ "$(/usr/libexec/PlistBuddy -c 'Print :SUEnableAutomaticChecks' "$plist")" = false ]
 
 expect_rejection() {
   if output=$(sh "$root/scripts/validate-app.sh" "$bundle" Hex.app 2.1.0 20100 2>&1); then
@@ -29,7 +30,7 @@ expect_rejection 'wrong bundle identifier'
 expect_rejection 'wrong bundle identifier'
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier ly.anoma.Hex' "$plist"
 expect_rejection 'wrong bundle identifier'
-/usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.kitlangton.hex2' "$plist"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.saidyaka.said' "$plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable voice-control-watch' "$plist"
 expect_rejection 'wrong executable name'
 
