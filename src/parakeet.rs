@@ -550,10 +550,10 @@ fn current_focus() -> crate::output_instructions::FocusRead {
     {
         // Bundle id only. A full context snapshot runs AppleScript for Brave
         // and can ask for automation permission on every paste.
-        return match crate::context::frontmost_bundle_identifier() {
+        match crate::context::frontmost_bundle_identifier() {
             Some(bundle) => crate::output_instructions::FocusRead::App(bundle),
             None => crate::output_instructions::FocusRead::Unreadable,
-        };
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {

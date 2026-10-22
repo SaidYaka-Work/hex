@@ -151,6 +151,8 @@ pub enum FocusRead {
     /// Wayland, or a focus read that failed. Windows always reports `None` or `App`.
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     Unreadable,
+    /// No focused application. macOS reports a bundle id or [`Self::Unreadable`].
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     None,
     App(String),
 }

@@ -186,7 +186,19 @@ pub fn run(
     output.worker = Some(thread::spawn(move || {
         let mut paster = LinuxPaster::new(worker_stop.clone(), paste_with_shift, wayland_modifiers);
         let mut last_dictation: Option<String> = None;
-        while let Ok(job) = job_receiver.recv() {
+        // The worker holds a sender for deferred pastes, so closing the
+        // caller's sender does not wake `recv`. Poll so shutdown can finish.
+        loop {
+            let job = match job_receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(job) => job,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if worker_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             if worker_stop.load(Ordering::Acquire) {
                 break;
             }
