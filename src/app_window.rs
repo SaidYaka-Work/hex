@@ -30,10 +30,10 @@ use crate::desktop_ui::{
     ButtonKind, Icon, NavigationIcon, Tone, busy_label, button, danger_menu_item, detail_body,
     detail_header, detail_placeholder, detail_row, detail_title, disclosure_button,
     disclosure_frame, dropdown_menu_with_progress, error_message, error_panel, hotkey_keycaps,
-    icon, icon_button, inline_error, list_row, list_row_meta, list_row_title, listener_status,
-    menu_item, menu_with_progress, mix_color, navigation_item, pane_body, pane_content,
-    pane_detail, pane_header, pane_header_with_action, pane_list, pane_scroll_body, panel,
-    panel_header, progress_track, section_label, settings_copy, settings_row,
+    icon, icon_button, inline_error, large_button, list_row, list_row_meta, list_row_title,
+    listener_status, menu_item, menu_with_progress, mix_color, navigation_item, pane_body,
+    pane_content, pane_detail, pane_header, pane_header_with_action, pane_list, pane_scroll_body,
+    panel, panel_header, progress_track, section_label, settings_copy, settings_row,
     settings_section_label, sidebar_frame, sliding_segmented_control, sliding_segmented_for,
     sliding_segmented_item, small_button, status_dot, tag, toggle, truncated_line, window_frame,
 };
@@ -55,7 +55,7 @@ use crate::text_input::{
 };
 use crate::transcription_models::{
     ModelDefinition, ModelRuntime, TranscriptionModelId, TranscriptionSelection, definition,
-    language_name, validate,
+    validate,
 };
 use crate::transcription_preparation::{PreparationStatus, TranscriptionPreparation};
 
@@ -107,6 +107,9 @@ struct Capabilities {
     fun: bool,
     modes: bool,
     voice_action: bool,
+    /// History is not in the window. The flag stays so each OS's capability
+    /// list still records that the runtime could retain dictation.
+    #[allow(dead_code)]
     history: bool,
     /// Privacy permissions gate dictation (macOS).
     permissions: bool,
@@ -223,7 +226,7 @@ fn open_new(
         platform::window_options(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("Hex".into()),
+                title: Some("Said.ai".into()),
                 appears_transparent: true,
                 ..Default::default()
             }),
@@ -474,10 +477,9 @@ impl Pane {
             .into_iter()
             .filter(|pane| match pane {
                 Self::Settings => true,
-                Self::Modes => capabilities.modes,
-                Self::Commands => capabilities.commands,
+                // History, Commands, and Modes are not part of the Said.ai window.
+                Self::Modes | Self::Commands | Self::History => false,
                 Self::VoiceAction => capabilities.voice_action,
-                Self::History => capabilities.history,
                 Self::Fun => capabilities.fun && fun,
                 Self::Meetings => capabilities.meetings && (developer_features || meetings),
                 Self::HudLab => capabilities.hud_lab && developer_features,
@@ -1192,6 +1194,12 @@ pub struct AppWindow {
     permission_refresh_at: Instant,
     settings: AppSettings,
     settings_load_error: Option<String>,
+    /// What the last home button did, shown under Talk / Talk to AI.
+    home_notice: String,
+    /// Parakeet English download was considered for this window.
+    parakeet_checked: bool,
+    /// Last Talk to AI instruction revision rendered into `home_notice`.
+    instruction_revision: u64,
     #[cfg(test)]
     settings_save_override: Option<fn(&AppSettings) -> color_eyre::Result<()>>,
     microphone_devices: Vec<String>,
@@ -1315,6 +1323,7 @@ impl AppWindow {
                         let personal_commands_changed = window.poll_personal_commands();
                         let personal_workspace_changed = window.poll_personal_workspace();
                         let history_changed = window.poll_history(cx);
+                        let instructions_changed = window.poll_instructions();
                         let platform_changed = window.poll_platform(cx);
                         let hex_mic_changed = window.poll_hex_microphone(cx);
                         let tour_changed = window.poll_tour(cx);
@@ -1331,6 +1340,7 @@ impl AppWindow {
                             || personal_commands_changed
                             || personal_workspace_changed
                             || history_changed
+                            || instructions_changed
                             || platform_changed
                             || hex_mic_changed
                         {
@@ -1450,7 +1460,17 @@ impl AppWindow {
                 None,
             )
         } else {
-            (ModelCatalogState::Loading, Some(start_model_catalog_load()))
+            // Production does not contact OpenCode. `Missing` would schedule
+            // a retry, so the catalog is an empty loaded list instead.
+            (
+                ModelCatalogState::Loaded(ModelCatalog {
+                    models: Vec::new(),
+                    default_key: None,
+                    default_name: None,
+                    default_variant: None,
+                }),
+                None,
+            )
         };
         let application_catalog = if preview_mode {
             ApplicationCatalogState::Loaded(Vec::new())
@@ -1801,6 +1821,9 @@ impl AppWindow {
             _activation_subscription: activation_subscription,
             settings,
             settings_load_error,
+            home_notice: String::new(),
+            parakeet_checked: false,
+            instruction_revision: crate::output_instructions::revision(),
             #[cfg(test)]
             settings_save_override: None,
             personal_commands_status,
@@ -3694,20 +3717,6 @@ impl AppWindow {
             .flatten();
         let hotkey_control = self.render_hotkey_setting_control(HotkeyKind::Dictation, window, cx);
         let paste_last_control = self.render_hotkey_control(HotkeyKind::PasteLast, window, cx);
-        let transcription_model = definition(self.settings.transcription.model);
-        let transcription_label = format!(
-            "{} · {}",
-            language_name(&self.settings.transcription.language),
-            transcription_model.name
-        );
-        let transcription_control = disclosure_button(transcription_label)
-            .id("transcription-model-setting")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.transcription_picker_language =
-                    Some(this.settings.transcription.language.clone());
-                this.clear_transcription_error();
-                cx.notify();
-            }));
         let double_tap_position = self.double_tap_toggle.render_position(window);
         let release_microphone_position = self.release_microphone_toggle.render_position(window);
         let toggle_mode = self.settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
@@ -3972,11 +3981,6 @@ impl AppWindow {
                 .child(
                     panel()
                         .child(settings_row(
-                            tr("Local transcription"),
-                            tr("Language and on-device speech model"),
-                            transcription_control,
-                        ))
-                        .child(settings_row(
                             tr("Microphone"),
                             tr("Input device for dictation and commands"),
                             div()
@@ -3991,21 +3995,6 @@ impl AppWindow {
                                 )
                                 .children(microphone_picker.map(deferred)),
                         ))
-                        .when(
-                            transcription_model.supports_recognition_hints,
-                            |settings| {
-                                settings.child(settings_row(
-                                    tr("Recognition hints"),
-                                    tr("Names and terms to prime the speech model"),
-                                    div()
-                                        .w(px(320.0))
-                                        .flex_none()
-                                        .child(
-                                            self.transcription_hints.entity.clone(),
-                                        ),
-                                ))
-                            },
-                        )
                         .child(settings_row(
                             tr("Shortcut mode"),
                             if toggle_mode {
@@ -7418,8 +7407,243 @@ impl TranscriptionPickerDelegate for AppWindow {
     }
 }
 
+impl AppWindow {
+    /// The running app shows only Talk and Talk to AI. Preview fixtures keep
+    /// the previous panes so their layout tests still render. `HEX_SIMPLIFIED_UI`
+    /// forces this home inside a preview, which is how the after screenshot is taken.
+    fn uses_simplified_home(&self) -> bool {
+        if std::env::var_os("HEX_SIMPLIFIED_UI").is_some() {
+            return true;
+        }
+        !self.preview
+    }
+
+    /// Downloads Parakeet English when it is not on disk yet. The first-run
+    /// tour starts the same download; this covers a later launch whose saved
+    /// model was pinned away from an already installed checkpoint.
+    fn ensure_parakeet(&mut self) {
+        if self.preview || self.parakeet_checked {
+            return;
+        }
+        self.parakeet_checked = true;
+        let selection = crate::transcription_models::parakeet_english();
+        let model = definition(selection.model);
+        if crate::transcription_models::is_installed(model, &selection.language) {
+            return;
+        }
+        if !self.platform_prepare_transcription(&selection) {
+            self.transcription_preparation.start(selection, false);
+        }
+    }
+
+    /// Talk is the dictation shortcut. The button turns the listener on and
+    /// tells the person which chord to hold.
+    fn activate_talk(&mut self, cx: &mut Context<Self>) {
+        if !self.preview {
+            self.set_listening(true);
+            self.ensure_parakeet();
+        }
+        let shortcut = hotkey_label(&self.settings.dictation_hotkey);
+        self.home_notice = tr_fill("Hold {} and speak. Release to paste.", &shortcut);
+        cx.notify();
+    }
+
+    fn poll_instructions(&mut self) -> bool {
+        let revision = crate::output_instructions::revision();
+        if revision == self.instruction_revision {
+            return false;
+        }
+        self.instruction_revision = revision;
+        if let Some(event) = crate::output_instructions::last_event() {
+            self.home_notice = tr(event.label()).to_string();
+        }
+        true
+    }
+
+    /// Talk to AI names the instruction chord. The chord captures speech;
+    /// the transcript is stored as an instruction, not sent to a model picker.
+    fn activate_talk_to_ai(&mut self, cx: &mut Context<Self>) {
+        if !self.preview {
+            self.set_listening(true);
+            self.ensure_parakeet();
+        }
+        let shortcut = hotkey_label(&self.settings.edit_hotkey);
+        self.home_notice = tr_fill("Hold {} and say how text should come out.", &shortcut);
+        cx.notify();
+    }
+
+    fn render_simplified_home(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if !self.setup_visible {
+            self.ensure_parakeet();
+        }
+        let talk_shortcut = hotkey_label(&self.settings.dictation_hotkey);
+        let ai_shortcut = hotkey_label(&self.settings.edit_hotkey);
+        let notice = self.home_notice.clone();
+        let active = crate::output_instructions::active();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .px_8()
+            .child(
+                pane_content()
+                    .max_w(px(420.0))
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        section_label(tr("Voice"))
+                            .text_color(rgb(ACCENT_TEXT))
+                            .pb_2(),
+                    )
+                    .child(div().text_display().child("Said.ai"))
+                    .child(
+                        div()
+                            .text_footnote()
+                            .text_color(rgb(TEXT_TERTIARY))
+                            .text_center()
+                            .child(tr(
+                                "Talk pastes your words. Talk to AI tells Said.ai how those words should come out.",
+                            )),
+                    )
+                    .child(
+                        div()
+                            .pt_6()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                large_button(ButtonKind::Primary, tr("Talk"))
+                                    .id("talk")
+                                    .debug_selector(|| "talk-button".into())
+                                    .on_click(cx.listener(|this, _, _, cx| this.activate_talk(cx))),
+                            )
+                            .child(
+                                div()
+                                    .text_caption()
+                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .child(tr_fill("Dictation · {}", &talk_shortcut)),
+                            )
+                            .child(
+                                large_button(ButtonKind::Secondary, tr("Talk to AI"))
+                                    .id("talk-to-ai")
+                                    .mt_4()
+                                    .debug_selector(|| "talk-to-ai-button".into())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.activate_talk_to_ai(cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_caption()
+                                    .text_color(rgb(TEXT_TERTIARY))
+                                    .child(tr_fill("Instructions · {}", &ai_shortcut)),
+                            ),
+                    )
+                    .child(render_active_instructions(&active))
+                    .when(!notice.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .pt_4()
+                                .text_footnote()
+                                .text_color(rgb(TEXT_SECONDARY))
+                                .text_center()
+                                .debug_selector(|| "home-notice".into())
+                                .child(notice),
+                        )
+                    })
+                    .child(
+                        div()
+                            .pt_8()
+                            .text_caption()
+                            .text_color(rgb(TEXT_DISABLED))
+                            .child(tr_fill("Version {}", env!("CARGO_PKG_VERSION"))),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+fn render_active_instructions(
+    active: &[crate::output_instructions::ActiveInstruction],
+) -> gpui::Div {
+    div()
+        .pt_6()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_2()
+        .debug_selector(|| "active-instructions".into())
+        .child(
+            section_label(tr("Active"))
+                .text_color(rgb(ACCENT_TEXT)),
+        )
+        .when(active.is_empty(), |column| {
+            column.child(
+                div()
+                    .text_caption()
+                    .text_color(rgb(TEXT_TERTIARY))
+                    .child(tr("No instructions yet")),
+            )
+        })
+        .children(active.iter().map(|item| {
+            div()
+                .max_w(px(360.0))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(tag(Tone::Accent, tr(item.scope.label())))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(rgb(TEXT_SECONDARY))
+                        .child(item.text.clone()),
+                )
+        }))
+}
+
+fn hotkey_label(binding: &crate::app_settings::HotkeyBinding) -> String {
+    let label = binding.keycaps().join(" + ");
+    if label.is_empty() {
+        tr("the shortcut").into()
+    } else {
+        label
+    }
+}
+
 impl Render for AppWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.uses_simplified_home() {
+            let _frame_guard = crate::motion::begin_frame("Said.ai");
+            let setup = self.setup_visible.then(|| self.render_tour(window, cx));
+            let main_content = self.render_simplified_home(cx);
+            return platform::frame(window_frame())
+                .track_focus(&self.window_focus)
+                .on_action(|_: &CloseWindow, window, _| window.remove_window())
+                .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
+                .on_action(|_: &ToggleFullscreen, window, _| window.toggle_fullscreen())
+                .child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .children(platform::caption(window))
+                        .child(div().flex_1().min_h_0().child(main_content)),
+                )
+                .children(setup)
+                .into_any_element();
+        }
+        self.render_classic_shell(window, cx)
+    }
+}
+
+impl AppWindow {
+    /// The previous sidebar shell. Preview fixtures still draw it so layout
+    /// tests keep covering those panes. The running app does not.
+    fn render_classic_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let _frame_guard = crate::motion::begin_frame(self.pane.label());
         crate::motion::pane_switch_rendered(self.pane.label(), window);
         let model_notice = self.render_model_notice(cx);
@@ -7525,6 +7749,7 @@ impl Render for AppWindow {
             .children(setup)
             .children(transcription_picker)
             .children(mode_context_menu)
+            .into_any_element()
     }
 }
 
@@ -9390,29 +9615,19 @@ mod tests {
     }
 
     #[test]
-    fn production_navigation_keeps_commands_available_as_an_opt_in() {
+    fn production_navigation_omits_history_commands_and_modes() {
         assert_eq!(
             Pane::all(platform::CAPABILITIES, false, false),
-            vec![
-                Pane::Settings,
-                Pane::Modes,
-                Pane::Commands,
-                Pane::VoiceAction,
-                Pane::History,
-            ]
+            vec![Pane::Settings, Pane::VoiceAction,]
         );
         assert_eq!(
             Pane::all(platform::CAPABILITIES, false, true),
-            vec![
-                Pane::Settings,
-                Pane::Modes,
-                Pane::Commands,
-                Pane::VoiceAction,
-                Pane::History,
-                Pane::Meetings,
-            ],
+            vec![Pane::Settings, Pane::VoiceAction, Pane::Meetings,],
             "the meetings opt-in adds only the Meetings pane"
         );
+        assert!(!Pane::all(platform::CAPABILITIES, false, true).contains(&Pane::History));
+        assert!(!Pane::all(platform::CAPABILITIES, false, true).contains(&Pane::Commands));
+        assert!(!Pane::all(platform::CAPABILITIES, false, true).contains(&Pane::Modes));
     }
 
     #[test]
@@ -9421,10 +9636,7 @@ mod tests {
             Pane::all(platform::CAPABILITIES, true, false),
             vec![
                 Pane::Settings,
-                Pane::Modes,
-                Pane::Commands,
                 Pane::VoiceAction,
-                Pane::History,
                 Pane::HudLab,
                 Pane::Meetings,
                 Pane::Activity,
@@ -9439,14 +9651,7 @@ mod tests {
         );
         assert_eq!(
             Pane::all_with_fun(platform::CAPABILITIES, false, false, true),
-            vec![
-                Pane::Settings,
-                Pane::Modes,
-                Pane::Commands,
-                Pane::VoiceAction,
-                Pane::History,
-                Pane::Fun,
-            ]
+            vec![Pane::Settings, Pane::VoiceAction, Pane::Fun,]
         );
     }
 

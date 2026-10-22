@@ -961,6 +961,16 @@ pub(crate) fn button(kind: ButtonKind, label: impl IntoElement) -> Div {
         .child(label)
 }
 
+/// A [`CONTROL_HEIGHT_LARGE`] pill for the home actions. Same frame as
+/// [`button`], only taller.
+pub(crate) fn large_button(kind: ButtonKind, label: impl IntoElement) -> Div {
+    button_frame(kind)
+        .h(px(CONTROL_HEIGHT_LARGE))
+        .px_5()
+        .text_body()
+        .child(label)
+}
+
 /// A [`CONTROL_HEIGHT_SMALL`] button for actions inside list rows and cards.
 pub(crate) fn small_button(kind: ButtonKind, label: impl IntoElement) -> Div {
     button_frame(kind)
@@ -977,7 +987,7 @@ pub(crate) fn icon_button(kind: ButtonKind, glyph: Icon) -> Div {
     let color = match kind {
         ButtonKind::Ghost => TEXT_TERTIARY,
         ButtonKind::Secondary => TEXT_SECONDARY,
-        ButtonKind::Primary => TEXT_PRIMARY,
+        ButtonKind::Primary => ON_ACCENT,
         ButtonKind::Danger => DANGER,
     };
     button_frame(kind)
@@ -998,8 +1008,8 @@ fn button_frame(kind: ButtonKind) -> Div {
     match kind {
         ButtonKind::Primary => frame
             .bg(rgb(ACCENT))
-            .text_color(rgb(TEXT_PRIMARY))
-            .hover(|button| button.bg(mix_color(rgb(ACCENT), rgb(TEXT_PRIMARY), 0.12))),
+            .text_color(rgb(ON_ACCENT))
+            .hover(|button| button.bg(mix_color(rgb(ACCENT), rgb(SURFACE), 0.14))),
         ButtonKind::Secondary => frame
             .border_1()
             .border_color(rgb(LINE))

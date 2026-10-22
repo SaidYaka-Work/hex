@@ -212,7 +212,7 @@ pub(crate) fn caption_brand() -> impl IntoElement {
                     .text_step(CAPTION)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(TEXT_SECONDARY))
-                    .child("Hex"),
+                    .child("Said.ai"),
             ),
     )
 }

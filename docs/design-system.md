@@ -1,7 +1,10 @@
 # Hex Design System
 
-The GPUI desktop app (Settings window, meeting capsules, transcription picker,
-and the Linux Settings window) is built from two modules:
+The GPUI desktop app is built from two modules. The running window is the
+Said.ai home (Talk and Talk to AI) on the paper palette sampled from
+saidyaka.com: warm canvas, white cards, near-black ink, terracotta labels,
+serif headlines, and pill buttons. Preview fixtures still draw the previous
+panes with the same tokens.
 
 - [`src/design_tokens.rs`](../src/design_tokens.rs) holds every raw value:
   colours, the type scale, spacing, radii, and control geometry.

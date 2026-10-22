@@ -272,7 +272,7 @@ fn open_settings(event_path: PathBuf, shutdown: &'static AtomicBool) -> Result<(
             crate::app_window::open(event_path, cx).expect("could not open the Hex window");
         window
             .update(cx, |_, window, cx| {
-                window.set_window_title("Hex");
+                window.set_window_title("Said.ai");
                 // Quit without letting GPUI close the window here: on Wayland
                 // it destroys the Vulkan surface at once, and a configure the
                 // compositor queued behind the close (as sway does when it

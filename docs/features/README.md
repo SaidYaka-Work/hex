@@ -24,6 +24,17 @@ HEX                                      // macOS release
 └── Maintain the app                     // menu bar, login, updates, quit
 ```
 
+The running window is Said.ai. Talk holds the dictation shortcut and pastes
+local Parakeet English with no language model. Talk to AI holds the second
+shortcut and stores a spoken instruction: short-term until it is changed or
+the app quits, long-term in `output-instructions.json`. The home screen lists
+the instructions that are active. The language model that would apply them is
+`llm_backend::LLM_BACKEND`, currently unconfigured, so Talk stays verbatim.
+History, Commands, and Modes are not in the window and have no hotkeys.
+Transcription is pinned to Parakeet Unified English, including the first-run
+download, and there is no model or provider picker. Preview fixtures can still
+render the previous pane contents; the navigation list does not.
+
 [Dictation](dictation.md), [Voice Commands](commands.md),
 [Voice Action](voice-action.md), [Meetings](meetings.md), and [Recovery](recovery.md)
 have detailed maps.

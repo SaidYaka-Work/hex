@@ -82,10 +82,7 @@ impl WindowsDictationConfig {
             device: settings.microphone.clone(),
             hotkey: WindowsHotkey::from(&settings.dictation_hotkey),
             paste_last_hotkey: settings.paste_last_hotkey.as_ref().map(WindowsHotkey::from),
-            voice_action_hotkey: settings
-                .voice_action
-                .enabled
-                .then(|| WindowsHotkey::from(&settings.edit_hotkey)),
+            voice_action_hotkey: Some(WindowsHotkey::from(&settings.edit_hotkey)),
             double_tap_lock: settings.double_tap_lock,
             double_tap_only: settings.double_tap_only,
             shortcut_mode: settings.shortcut_mode,
@@ -746,8 +743,8 @@ fn process_dictation_job(
     paster: &mut Result<WindowsPaster>,
     history: Option<&crate::history::History>,
     last_dictation: &Mutex<Option<String>>,
-    mode_runtime: &RwLock<crate::dictation_modes::ModeRuntime>,
-    transformations: &crate::personal_commands::TransformationClient,
+    _mode_runtime: &RwLock<crate::dictation_modes::ModeRuntime>,
+    _transformations: &crate::personal_commands::TransformationClient,
 ) -> JobResult {
     let started = Instant::now();
     // The context read starts now so the UIA walk overlaps inference.
@@ -769,12 +766,12 @@ fn process_dictation_job(
         if raw_text.is_empty() {
             return Err("transcription was empty".into());
         }
-        let mode_runtime = mode_runtime
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let processed = mode_runtime.process(&raw_text, &context, transformations);
-        let text = processed.text.clone();
+        let text = crate::output_instructions::finish_talk(&raw_text);
+        let processed = crate::dictation_processor::Processed {
+            text: text.clone(),
+            observation: None,
+            transformations: Vec::new(),
+        };
         if text.trim().is_empty() {
             return Err("text replacements produced empty output".into());
         }
@@ -810,21 +807,15 @@ fn process_dictation_job(
     job_result(OutputKind::Dictation, result, latency_ms)
 }
 
-/// Voice Action replies may take longer than a dictation rewrite.
-const VOICE_ACTION_DEADLINE: Duration = Duration::from_secs(45);
-
-/// Transcribe the held instruction, pair it with the focused application's
-/// selection, ask OpenCode, and paste the reply.
+/// Transcribe the held instruction and store it. A one-shot rewrite pastes
+/// only when the configured language model returns text.
 fn process_voice_action_job(
     job: Job,
     paster: &mut Result<WindowsPaster>,
-    voice_action_model: &RwLock<Option<crate::dictation_processor::Model>>,
+    _voice_action_model: &RwLock<Option<crate::dictation_processor::Model>>,
 ) -> JobResult {
     let started = Instant::now();
-    // The context read starts now so the UIA walk overlaps inference.
-    let pending_context = crate::windows_context::begin_capture();
     let transcription = job.transcript.wait().map(|transcribed| transcribed.text);
-    let context = pending_context.finish();
     let result = transcription.and_then(|instruction| {
         if instruction.is_empty() {
             return Err("the voice instruction was empty".into());
@@ -834,28 +825,14 @@ fn process_voice_action_job(
             tracing::warn!(%error, "could not copy the selection for the voice action");
             None
         });
-        let model = voice_action_model
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let processed = crate::dictation_processor::process_voice_action(
-            &instruction,
-            selected.as_deref(),
-            &context,
-            model.as_ref(),
-            VOICE_ACTION_DEADLINE,
-            &AtomicBool::new(false),
-            Instant::now(),
-        );
-        if let Some(error) = processed
-            .observation
-            .and_then(|observation| observation.fallback)
-        {
-            return Err(error);
+        let outcome = crate::output_instructions::accept(&instruction, selected.as_deref());
+        if let Some(reply) = outcome.paste.filter(|text| !text.trim().is_empty()) {
+            paster
+                .paste(&reply)
+                .map_err(|error| format!("{error:#}"))?;
+            return Ok(reply);
         }
-        let reply = processed.text;
-        paster.paste(&reply).map_err(|error| format!("{error:#}"))?;
-        Ok(reply)
+        Ok(String::new())
     });
     match result {
         Ok(text) => JobResult {

@@ -146,7 +146,7 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
         MainThreadMarker::new().ok_or_else(|| eyre!("status item requires the main thread"))?;
     let (actions, receiver) = sync_channel(8);
     let target = StatusItemTarget::new(actions, mtm);
-    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Hex"));
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Said.ai"));
     let meeting_status = add_item(
         &menu,
         &target,
@@ -185,6 +185,7 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
         mtm,
     );
     add_item(&menu, &target, "Settings…", sel!(openSettings:), mtm);
+    // Model picker removed - Said.ai uses Parakeet English by default
     let models = NSMenu::initWithTitle(
         NSMenu::alloc(mtm),
         &NSString::from_str("Transcription Model"),
@@ -199,6 +200,9 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
         )
     };
     heading.setSubmenu(Some(&models));
+    // Kept only so the menu items stay retained. It is never shown: Said.ai
+    // does not offer Transcription Model or Manage Models….
+    heading.setHidden(true);
     menu.addItem(&heading);
     let model_items = MODELS
         .iter()
@@ -262,14 +266,14 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
         );
     }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    add_item(&menu, &target, "Quit Hex", sel!(quit:), mtm);
+    add_item(&menu, &target, "Quit Said.ai", sel!(quit:), mtm);
 
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(-2.0);
     let button = item
         .button(mtm)
         .ok_or_else(|| eyre!("status item button is unavailable"))?;
-    let symbol = status_bar_icon(IDLE_ICON_PNG, "Hex")?;
-    let recording_symbol = status_bar_icon(RECORDING_ICON_PNG, "Hex is recording a meeting")?;
+    let symbol = status_bar_icon(IDLE_ICON_PNG, "Said.ai")?;
+    let recording_symbol = status_bar_icon(RECORDING_ICON_PNG, "Said.ai is recording a meeting")?;
     button.setImage(Some(&symbol));
     item.setMenu(Some(&menu));
 
@@ -580,7 +584,7 @@ mod tests {
     #[test]
     fn status_bar_icons_load_as_18pt_retina_templates() {
         for (png, description) in [
-            (IDLE_ICON_PNG, "Hex"),
+            (IDLE_ICON_PNG, "Said.ai"),
             (RECORDING_ICON_PNG, "Hex is recording a meeting"),
         ] {
             let icon = status_bar_icon(png, description).unwrap();

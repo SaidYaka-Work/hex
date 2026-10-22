@@ -558,10 +558,6 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
             KeyBinding::new("ctrl-cmd-f", crate::app_window::ToggleFullscreen, None),
             KeyBinding::new("cmd-,", crate::app_window::ShowSettings, None),
             KeyBinding::new("cmd-1", crate::app_window::ShowSettings, None),
-            KeyBinding::new("cmd-2", crate::app_window::ShowModes, None),
-            KeyBinding::new("cmd-3", crate::app_window::ShowCommands, None),
-            KeyBinding::new("cmd-4", crate::app_window::ShowVoiceAction, None),
-            KeyBinding::new("cmd-5", crate::app_window::ShowHistory, None),
         ]);
         cx.bind_keys(crate::text_input::key_bindings());
         cx.on_action(move |_: &crate::app_window::CloseWindow, cx| {
@@ -599,7 +595,7 @@ pub fn run(shutdown: &'static AtomicBool, launch: Launch) -> Result<()> {
         ]);
         cx.set_menus(vec![
             Menu {
-                name: "Hex".into(),
+                name: "Said.ai".into(),
                 items: application_items,
             },
             Menu {
@@ -785,17 +781,8 @@ async fn drive_ui(
                         tracing::error!(%error, "could not open Hex from status item");
                     }
                 },
-                crate::status_item::StatusItemAction::SelectModel(model) => {
-                    let (_, current) = crate::app_settings::transcription_selection();
-                    ui.model_menu_settings.transcription = current;
-                    let selection = crate::app_window::menu_transcription_selection(
-                        &ui.app_window,
-                        model,
-                        &ui.model_menu_settings,
-                        cx,
-                    );
-                    ui.transcription_preparation.start(selection, true);
-                    model_menu_refresh_at = Instant::now();
+                crate::status_item::StatusItemAction::SelectModel(_) => {
+                    // The menu no longer offers a model. Parakeet English stays selected.
                 }
                 crate::status_item::StatusItemAction::CancelModelPreparation => {
                     ui.transcription_preparation.cancel();

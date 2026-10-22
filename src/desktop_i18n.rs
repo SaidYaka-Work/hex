@@ -64,6 +64,7 @@ pub(crate) fn system_language() -> String {
 /// The person's first preferred language, for choosing a speech model. On
 /// macOS this is the system's language list, which apps opened from Finder
 /// see without `LANG`.
+#[allow(dead_code)]
 pub(crate) fn preferred_language() -> String {
     #[cfg(target_os = "macos")]
     if let Some(language) = macos_preferred_language() {
@@ -311,7 +312,7 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Press a shortcut...", ["Naciśnij skrót...", "按下快捷键...", "ショートカットを押してください...", "Kürzel drücken...", "Pulsa un atajo..."]),
     ("The transcription change did not apply.", ["Zmiana transkrypcji nie została zastosowana.", "转写更改未生效。", "文字起こしの変更が適用されませんでした。", "Die Transkriptionsänderung wurde nicht übernommen.", "El cambio de transcripción no se aplicó."]),
     ("Automatic microphone", ["Automatyczny mikrofon", "自动麦克风", "自動マイク", "Automatisches Mikrofon", "Micrófono automático"]),
-    ("Welcome to Hex", ["Witaj w Hex", "欢迎使用 Hex", "Hex へようこそ", "Willkommen bei Hex", "Bienvenido a Hex"]),
+    ("Welcome to Said.ai", ["Witaj w Said.ai", "欢迎使用 Said.ai", "Said.ai へようこそ", "Willkommen bei Said.ai", "Bienvenido a Said.ai"]),
     ("Dictate into any application. Audio never leaves this computer; one speech model download is all it takes.", ["Dyktuj w dowolnej aplikacji. Dźwięk nigdy nie opuszcza tego komputera; wystarczy pobrać jeden model mowy.", "在任何应用中听写。音频绝不离开这台电脑；只需下载一个语音模型。", "どのアプリでも音声入力できます。音声はこのコンピューターから出ません。音声モデルを一つダウンロードするだけです。", "Diktiere in jede Anwendung. Audio verlässt diesen Computer nie; ein Sprachmodell-Download genügt.", "Dicta en cualquier aplicación. El audio nunca sale de este equipo; basta con descargar un modelo de voz."]),
     ("Dictation language", ["Język dyktowania", "听写语言", "音声入力の言語", "Diktatsprache", "Idioma de dictado"]),
     ("Download {}", ["Pobierz {}", "下载 {}", "{} をダウンロード", "{} herunterladen", "Descargar {}"]),
@@ -494,7 +495,7 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Search history", ["Szukaj w historii", "搜索历史记录", "履歴を検索", "Verlauf durchsuchen", "Buscar en el historial"]),
     ("Seconds", ["Sekundy", "秒", "秒", "Sekunden", "Segundos"]),
     ("Set up", ["Skonfiguruj", "设置", "セットアップ", "Einrichten", "Configurar"]),
-    ("Set up Hex", ["Skonfiguruj Hex", "设置 Hex", "Hex をセットアップ", "Hex einrichten", "Configurar Hex"]),
+    ("Set up Said.ai", ["Skonfiguruj Said.ai", "设置 Said.ai", "Said.ai をセットアップ", "Said.ai einrichten", "Configurar Said.ai"]),
     ("Settings error:", ["Błąd ustawień:", "设置错误：", "設定エラー:", "Einstellungsfehler:", "Error de ajustes:"]),
     ("Shortcut mode", ["Tryb skrótu", "快捷键模式", "ショートカットモード", "Kürzelmodus", "Modo del atajo"]),
     ("Show Dock icon", ["Pokaż ikonę w Docku", "显示程序坞图标", "Dock にアイコンを表示", "Dock-Symbol anzeigen", "Mostrar icono en el Dock"]),
@@ -642,10 +643,10 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("No timestamps", ["Bez znaczników czasu", "无时间戳", "タイムスタンプなし", "Keine Zeitstempel", "Sin marcas de tiempo"]),
     ("Segment timestamps", ["Znaczniki czasu segmentów", "分段时间戳", "セグメントのタイムスタンプ", "Segment-Zeitstempel", "Marcas de tiempo por segmento"]),
     ("Token timestamps", ["Znaczniki czasu tokenów", "词元时间戳", "トークンのタイムスタンプ", "Token-Zeitstempel", "Marcas de tiempo por token"]),
-    ("Show Hex", ["Pokaż Hex", "显示 Hex", "Hex を表示", "Hex anzeigen", "Mostrar Hex"]),
+    ("Show Said.ai", ["Pokaż Said.ai", "显示 Said.ai", "Said.ai を表示", "Said.ai anzeigen", "Mostrar Said.ai"]),
     ("Enable / Disable Hex", ["Włącz / wyłącz Hex", "启用 / 停用 Hex", "Hex を有効 / 無効にする", "Hex aktivieren / deaktivieren", "Activar / desactivar Hex"]),
-    ("Quit Hex", ["Zakończ Hex", "退出 Hex", "Hex を終了", "Hex beenden", "Salir de Hex"]),
-    ("Hex Dictation", ["Dyktowanie Hex", "Hex 听写", "Hex 音声入力", "Hex-Diktat", "Dictado de Hex"]),
+    ("Quit Said.ai", ["Zakończ Said.ai", "退出 Said.ai", "Said.ai を終了", "Said.ai beenden", "Salir de Said.ai"]),
+    ("Said.ai Dictation", ["Dyktowanie Said.ai", "Said.ai 听写", "Said.ai 音声入力", "Said.ai-Diktat", "Dictado de Said.ai"]),
     ("Enabled", ["Włączony", "已启用", "有効", "Aktiviert", "Activado"]),
     ("Sleeping", ["Uśpiony", "休眠中", "スリープ中", "Schläft", "En reposo"]),
     ("Enabling…", ["Włączanie…", "正在启用…", "有効化中…", "Wird aktiviert…", "Activando…"]),
@@ -809,6 +810,30 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("You", ["Ty", "你", "あなた", "Du", "Tú"]),
     ("Your 5s sample", ["Twoja próbka 5 s", "你的 5 秒录音", "あなたの5秒サンプル", "Deine 5-Sek.-Aufnahme", "Tu muestra de 5 s"]),
     ("Your voice", ["Twój głos", "你的声音", "自分の声", "Deine Stimme", "Tu voz"]),
+    // Said.ai home
+    ("Voice", ["Głos", "语音", "音声", "Stimme", "Voz"]),
+    ("Two ways to speak. Hold the shortcut, then release to paste.", ["Dwa sposoby mówienia. Przytrzymaj skrót, a potem puść, aby wkleić.", "两种说话方式。按住快捷键，松开后粘贴。", "話し方は二つ。ショートカットを押したまま話し、離すと貼り付けます。", "Zwei Arten zu sprechen. Kürzel halten und zum Einfügen loslassen.", "Dos formas de hablar. Mantén el atajo y suéltalo para pegar."]),
+    ("Talk", ["Mów", "说话", "話す", "Sprechen", "Hablar"]),
+    ("Talk to AI", ["Mów do AI", "和 AI 说话", "AI に話す", "Mit KI sprechen", "Hablar con la IA"]),
+    ("Dictation · {}", ["Dyktowanie · {}", "听写 · {}", "音声入力 · {}", "Diktat · {}", "Dictado · {}"]),
+    ("Voice Action · {}", ["Voice Action · {}", "Voice Action · {}", "Voice Action · {}", "Voice Action · {}", "Voice Action · {}"]),
+    ("Hold {} and speak. Release to paste.", ["Przytrzymaj {} i mów. Puść, aby wkleić.", "按住 {} 并说话。松开即可粘贴。", "{} を押したまま話します。離すと貼り付けます。", "Halte {} und sprich. Loslassen fügt ein.", "Mantén {} y habla. Suelta para pegar."]),
+    ("Hold {} and speak an instruction.", ["Przytrzymaj {} i podaj polecenie.", "按住 {} 并说出指令。", "{} を押したまま指示を話します。", "Halte {} und sprich eine Anweisung.", "Mantén {} y di una instrucción."]),
+    ("the shortcut", ["skrót", "快捷键", "ショートカット", "das Kürzel", "el atajo"]),
+    ("Talk pastes your words. Talk to AI tells Said.ai how those words should come out.", ["Mów wkleja twoje słowa. Mów do AI mówi Said.ai, jak te słowa mają wyjść.", "说话会粘贴你的原话。和 AI 说话告诉 Said.ai 这些文字该怎么出来。", "話すは言葉をそのまま貼ります。AI に話すは、その文章の出方を Said.ai に伝えます。", "Sprechen fügt deine Worte ein. Mit KI sprechen sagt Said.ai, wie dieser Text herauskommen soll.", "Hablar pega tus palabras. Hablar con la IA le dice a Said.ai cómo debe salir ese texto."]),
+    ("Instructions · {}", ["Polecenia · {}", "指令 · {}", "指示 · {}", "Anweisungen · {}", "Instrucciones · {}"]),
+    ("Hold {} and say how text should come out.", ["Przytrzymaj {} i powiedz, jak tekst ma wyjść.", "按住 {}，说出文字该怎么出来。", "{} を押したまま、文章の出方を話します。", "Halte {} und sag, wie der Text herauskommen soll.", "Mantén {} y di cómo debe salir el texto."]),
+    ("For now", ["Na razie", "暂时", "今は", "Vorerst", "Por ahora"]),
+    ("Always", ["Zawsze", "一直", "いつも", "Immer", "Siempre"]),
+    ("No instructions yet", ["Nie ma jeszcze poleceń", "还没有指令", "まだ指示はありません", "Noch keine Anweisungen", "Aún no hay instrucciones"]),
+    ("That applies for now.", ["To obowiązuje na razie.", "这暂时生效。", "これは今のあいだ有効です。", "Das gilt vorerst.", "Eso aplica por ahora."]),
+    ("That is saved for next time.", ["To zostaje na później.", "这会留到下次。", "これは次回も残ります。", "Das bleibt für das nächste Mal gespeichert.", "Eso queda guardado para la próxima."]),
+    ("Cleared the instructions for this session.", ["Wyczyszczono polecenia tej sesji.", "已清除本次的指令。", "このセッションの指示を消しました。", "Die Anweisungen dieser Sitzung wurden gelöscht.", "Se borraron las instrucciones de esta sesión."]),
+    ("Cleared the saved instructions.", ["Wyczyszczono zapisane polecenia.", "已清除保存的指令。", "保存した指示を消しました。", "Die gespeicherten Anweisungen wurden gelöscht.", "Se borraron las instrucciones guardadas."]),
+    ("Cleared every instruction.", ["Wyczyszczono wszystkie polecenia.", "已清除全部指令。", "すべての指示を消しました。", "Alle Anweisungen wurden gelöscht.", "Se borraron todas las instrucciones."]),
+    ("Applied that to the current text.", ["Zastosowano to do bieżącego tekstu.", "已应用到当前文字。", "今の文章に適用しました。", "Das wurde auf den aktuellen Text angewandt.", "Eso se aplicó al texto actual."]),
+    ("Heard that. The language model is not configured yet, so the text stays as dictated.", ["Usłyszane. Model językowy nie jest jeszcze ustawiony, więc tekst zostaje taki, jak dyktowany.", "已听到。语言模型还没配置，所以文字保持口述原文。", "聞き取りました。言語モデルはまだ設定されていないので、文章は口述のままです。", "Gehört. Das Sprachmodell ist noch nicht eingestellt, der Text bleibt diktiert.", "Escuchado. El modelo de lenguaje aún no está configurado, así que el texto queda como se dictó."]),
+    ("Heard that. There is no text to change yet.", ["Usłyszane. Nie ma jeszcze tekstu do zmiany.", "已听到。还没有可改的文字。", "聞き取りました。まだ変える文章がありません。", "Gehört. Es gibt noch keinen Text zum Ändern.", "Escuchado. Todavía no hay texto que cambiar."]),
 ];
 
 #[cfg(test)]

@@ -550,14 +550,17 @@ fn run_processor_worker(
         }
         let mut processed = process_job_text(
             &job,
-            crate::config::dictation_profiles,
+            || crate::config::dictation_profiles().without_language_model(),
             || {
-                crate::dictation_processor::process_voice_action_cancellable(
+                let outcome = crate::output_instructions::accept(
                     &job.text,
                     job.context.selected_text.as_deref(),
-                    &job.context,
-                    &job.control.cancelled,
-                )
+                );
+                crate::dictation_processor::Processed {
+                    text: outcome.paste.unwrap_or_default(),
+                    observation: None,
+                    transformations: Vec::new(),
+                }
             },
             || {
                 let _ = events.send(WorkerEvent::Stage {
@@ -567,6 +570,14 @@ fn run_processor_worker(
             },
         );
         processed.apply_transformations(transformations, &job.context, &job.control.cancelled);
+        if matches!(
+            job.target,
+            TranscriptionTarget::Paste | TranscriptionTarget::Send
+        ) {
+            processed.text = crate::output_instructions::finish_talk(&job.text);
+            processed.observation = None;
+            processed.transformations.clear();
+        }
         if job.control.is_cancelled() {
             let _ = output.send(OutputJob::Cancelled { job_id: job.job_id });
             continue;

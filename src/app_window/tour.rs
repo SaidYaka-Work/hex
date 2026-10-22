@@ -347,7 +347,7 @@ impl AppWindow {
         };
         centered_page(
             art,
-            tr("Welcome to Hex"),
+            tr("Welcome to Said.ai"),
             if platform::CAPABILITIES.permissions {
                 tr("Hold a key, say what you mean, and Hex types it wherever your cursor is. Your voice is transcribed on this Mac.")
             } else {

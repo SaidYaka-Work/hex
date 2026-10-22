@@ -2698,7 +2698,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_action_toggle_preserves_ownership_of_in_progress_key_gestures() {
+    fn talk_to_ai_chord_stays_reserved_when_the_old_opt_in_flips() {
         use crate::app_settings::{AppSettings, HotkeyKey};
 
         let mut settings = AppSettings::default();
@@ -2714,33 +2714,26 @@ mod tests {
         for enabled in [false, true] {
             let mut suppression = ShortcutSuppression::default();
             settings.voice_action.enabled = enabled;
-            assert_eq!(
-                suppression.process_all(event(true), settings.runtime_hotkeys(), true, false),
-                enabled
+            assert!(
+                suppression.process_all(event(true), settings.runtime_hotkeys(), true, false)
             );
             settings.voice_action.enabled = !enabled;
             for delivered in [true, false] {
-                assert_eq!(
-                    suppression.process_all(
-                        event(true),
-                        settings.runtime_hotkeys(),
-                        delivered,
-                        false
-                    ),
-                    enabled
-                );
+                assert!(suppression.process_all(
+                    event(true),
+                    settings.runtime_hotkeys(),
+                    delivered,
+                    false
+                ));
             }
-            assert_eq!(
-                suppression.process_all(event(false), settings.runtime_hotkeys(), true, false),
-                enabled
+            assert!(
+                suppression.process_all(event(false), settings.runtime_hotkeys(), true, false)
             );
-            assert_eq!(
-                suppression.process_all(event(true), settings.runtime_hotkeys(), true, false),
-                !enabled
+            assert!(
+                suppression.process_all(event(true), settings.runtime_hotkeys(), true, false)
             );
-            assert_eq!(
-                suppression.process_all(event(false), settings.runtime_hotkeys(), true, false),
-                !enabled
+            assert!(
+                suppression.process_all(event(false), settings.runtime_hotkeys(), true, false)
             );
         }
     }

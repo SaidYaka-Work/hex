@@ -69,6 +69,9 @@ impl Drop for OutputWorker {
 #[derive(Clone)]
 pub struct DictationOutput {
     pub history: Option<crate::history::History>,
+    /// Updated when settings change. Talk pastes Parakeet text and does not
+    /// read modes.
+    #[allow(dead_code)]
     pub modes: Arc<RwLock<crate::dictation_modes::ModeRuntime>>,
     pub transformations: Arc<crate::personal_commands::TransformationClient>,
 }
@@ -97,12 +100,14 @@ impl DictationOutput {
         started: Instant,
     ) -> Result<String> {
         let context = crate::linux_context::capture();
-        let modes = self
-            .modes
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let processed = modes.process(&raw_text, &context, &self.transformations);
+        // Talk is the Parakeet transcript. Mode and OpenCode rewrites stay off
+        // this path; standing instructions apply only through the one backend.
+        let text = crate::output_instructions::finish_talk(&raw_text);
+        let processed = crate::dictation_processor::Processed {
+            text: text.clone(),
+            observation: None,
+            transformations: Vec::new(),
+        };
         if processed.text.trim().is_empty() {
             return Err(eyre!("text replacements produced empty output"));
         }
@@ -169,10 +174,7 @@ pub fn run(
             .paste_last_hotkey
             .as_ref()
             .map(crate::linux_input::LinuxHotkey::from),
-        voice_action: settings
-            .voice_action
-            .enabled
-            .then(|| crate::linux_input::LinuxHotkey::from(&settings.edit_hotkey)),
+        voice_action: Some(crate::linux_input::LinuxHotkey::from(&settings.edit_hotkey)),
     };
     let hotkey = LinuxHotkeyMonitor::start_with(binding, options, hotkey_status)?;
     let wayland_modifiers = hotkey.wayland_modifiers();
@@ -516,25 +518,16 @@ pub fn run(
     Ok(())
 }
 
-/// Pairs the spoken instruction with the selected text, asks OpenCode with
-/// the Voice Action settings, and pastes the reply.
+/// Stores a Talk to AI instruction. A one-shot rewrite pastes only when the
+/// configured language model actually returns text.
 fn run_voice_action(instruction: &str, paster: &mut LinuxPaster) -> Result<String> {
-    let context = crate::linux_context::capture();
     let selected = paster.selected_text();
-    let processed = crate::dictation_processor::process_voice_action_cancellable(
-        instruction,
-        selected.as_deref(),
-        &context,
-        &AtomicBool::new(false),
-    );
-    if let Some(error) = processed
-        .observation
-        .and_then(|observation| observation.fallback)
-    {
-        return Err(eyre!(error));
+    let outcome = crate::output_instructions::accept(instruction, selected.as_deref());
+    if let Some(text) = outcome.paste.filter(|text| !text.trim().is_empty()) {
+        paster.paste(&text)?;
+        return Ok(text);
     }
-    paster.paste(&processed.text)?;
-    Ok(processed.text)
+    Ok(String::new())
 }
 
 /// Applies the saved sound settings and preloads the tones.

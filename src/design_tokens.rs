@@ -1,40 +1,44 @@
 //! The desktop design tokens: the only place raw colours, type sizes, line
 //! heights, radii, and control heights are written down. Panes and components
 //! name these tokens; `docs/design-system.md` explains when to use each one.
+//!
+//! Said.ai follows saidyaka.com: warm paper (`#f4efe6`), near-black ink,
+//! a terracotta eyebrow, white cards, and pill-shaped near-black buttons.
 
 use gpui::{FontWeight, Pixels, Styled, px};
 
-// Surfaces: the OpenCode V2 dark hierarchy, darkest (recessed) to lightest.
-pub(crate) const SIDEBAR: u32 = 0x111111;
-pub(crate) const SIDEBAR_HOVER: u32 = 0x1b1b1b;
-pub(crate) const CANVAS: u32 = 0x161616;
-pub(crate) const SURFACE: u32 = 0x1d1d1d;
-pub(crate) const SURFACE_HOVER: u32 = 0x252525;
-pub(crate) const SURFACE_SELECTED: u32 = 0x2e2e2e;
-pub(crate) const LINE: u32 = 0x2a2a2a;
-pub(crate) const LINE_STRONG: u32 = 0x3d3d3d;
+// Surfaces: warm paper, with white cards sitting on it.
+pub(crate) const SIDEBAR: u32 = 0xefe8dc;
+pub(crate) const SIDEBAR_HOVER: u32 = 0xe7dfd2;
+pub(crate) const CANVAS: u32 = 0xf4efe6;
+pub(crate) const SURFACE: u32 = 0xfffdf8;
+pub(crate) const SURFACE_HOVER: u32 = 0xf7f1e8;
+pub(crate) const SURFACE_SELECTED: u32 = 0xe7dfd2;
+pub(crate) const LINE: u32 = 0xe4dcd0;
+pub(crate) const LINE_STRONG: u32 = 0xcfc4b4;
 /// Modal backdrops.
-pub(crate) const SCRIM: u32 = 0x000000cc;
+pub(crate) const SCRIM: u32 = 0x161613cc;
 
-// Text, strongest to weakest. Tertiary is the weakest colour that still meets
-// 4.5:1 on every surface; disabled is reserved for unavailable controls.
-pub(crate) const TEXT_PRIMARY: u32 = 0xf2f2f2;
-pub(crate) const TEXT_SECONDARY: u32 = 0xd0d0d0;
-pub(crate) const TEXT_TERTIARY: u32 = 0x969696;
-pub(crate) const TEXT_DISABLED: u32 = 0x6e6e6e;
+// Ink, strongest to weakest. Tertiary still meets 4.5:1 on every surface.
+pub(crate) const TEXT_PRIMARY: u32 = 0x161613;
+pub(crate) const TEXT_SECONDARY: u32 = 0x3a3832;
+pub(crate) const TEXT_TERTIARY: u32 = 0x5c564e;
+pub(crate) const TEXT_DISABLED: u32 = 0xa39e94;
 
-// Roles. Each has a text/fill colour, a tinted surface, and a border.
-pub(crate) const ACCENT: u32 = 0x3b5cf6;
-pub(crate) const ACCENT_TEXT: u32 = 0x8390ff;
-pub(crate) const ACCENT_SURFACE: u32 = 0x1c2030;
-pub(crate) const ACCENT_BORDER: u32 = 0x2c3560;
-/// Text selection highlight: the accent at one-third opacity.
-pub(crate) const SELECTION: u32 = 0x3b5cf655;
-pub(crate) const SUCCESS: u32 = 0x69d89f;
-pub(crate) const SUCCESS_SURFACE: u32 = 0x17231a;
-pub(crate) const DANGER: u32 = 0xf17471;
-pub(crate) const DANGER_SURFACE: u32 = 0x2b1718;
-pub(crate) const DANGER_BORDER: u32 = 0x66292c;
+// The primary button is near-black ink, like saidyaka.com's pill.
+// Terracotta is the small-label accent, not the button fill.
+pub(crate) const ACCENT: u32 = 0x161613;
+pub(crate) const ON_ACCENT: u32 = 0xfffdf8;
+pub(crate) const ACCENT_TEXT: u32 = 0x8c3f28;
+pub(crate) const ACCENT_SURFACE: u32 = 0xf8ebe3;
+pub(crate) const ACCENT_BORDER: u32 = 0xe7d3c6;
+/// Text selection highlight: ink at low opacity.
+pub(crate) const SELECTION: u32 = 0x16161333;
+pub(crate) const SUCCESS: u32 = 0x166534;
+pub(crate) const SUCCESS_SURFACE: u32 = 0xe7f5ec;
+pub(crate) const DANGER: u32 = 0x9f1239;
+pub(crate) const DANGER_SURFACE: u32 = 0xfdecee;
+pub(crate) const DANGER_BORDER: u32 = 0xf3c3cb;
 
 /// One step of the type scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,6 +79,12 @@ pub(crate) const TITLE: TypeStep = TypeStep {
     line_height: 26.0,
     weight: Some(FontWeight::SEMIBOLD),
 };
+/// The home wordmark. Serif, like the headlines on saidyaka.com.
+pub(crate) const DISPLAY: TypeStep = TypeStep {
+    size: 36.0,
+    line_height: 48.0,
+    weight: Some(FontWeight::MEDIUM),
+};
 
 /// The only text below the scale: the L/R badge in a sided modifier keycap.
 pub(crate) const KEYCAP_SIDE_BADGE: TypeStep = TypeStep {
@@ -84,6 +94,15 @@ pub(crate) const KEYCAP_SIDE_BADGE: TypeStep = TypeStep {
 };
 
 pub(crate) const MONOSPACE_FAMILY: &str = "SF Mono";
+
+/// Editorial headlines. Each OS uses a serif that ships with the system;
+/// Linux installs use Liberation Serif.
+#[cfg(target_os = "linux")]
+pub(crate) const SERIF_FAMILY: &str = "Liberation Serif";
+#[cfg(target_os = "macos")]
+pub(crate) const SERIF_FAMILY: &str = "New York";
+#[cfg(target_os = "windows")]
+pub(crate) const SERIF_FAMILY: &str = "Georgia";
 
 /// SF Pro's ascender and descender as fractions of the font size.
 const FONT_ASCENT: f32 = 0.952;
@@ -124,11 +143,15 @@ pub(crate) trait Typography: Styled + Sized {
     }
 
     fn text_headline(self) -> Self {
-        self.text_step(HEADLINE)
+        self.text_step(HEADLINE).font_family(SERIF_FAMILY)
     }
 
     fn text_title(self) -> Self {
-        self.text_step(TITLE)
+        self.text_step(TITLE).font_family(SERIF_FAMILY)
+    }
+
+    fn text_display(self) -> Self {
+        self.text_step(DISPLAY).font_family(SERIF_FAMILY)
     }
 
     fn text_monospace(self) -> Self {
@@ -145,8 +168,10 @@ pub(crate) const SPACE_2: f32 = 8.0;
 
 // Radii.
 pub(crate) const RADIUS_SMALL: Pixels = px(4.0);
-pub(crate) const RADIUS_CONTROL: Pixels = px(6.0);
-pub(crate) const RADIUS_PANEL: Pixels = px(10.0);
+/// Pill controls: half of [`CONTROL_HEIGHT_LARGE`], so the home buttons match
+/// the fully rounded pills on saidyaka.com. Shorter controls clip to a pill too.
+pub(crate) const RADIUS_CONTROL: Pixels = px(22.0);
+pub(crate) const RADIUS_PANEL: Pixels = px(16.0);
 pub(crate) const RADIUS_MODAL: Pixels = px(12.0);
 pub(crate) const RADIUS_KNOB: Pixels = px(2.0);
 
@@ -158,6 +183,8 @@ pub(crate) fn icon_radius(size: f32) -> Pixels {
 // Control geometry.
 pub(crate) const CONTROL_HEIGHT: f32 = 30.0;
 pub(crate) const CONTROL_HEIGHT_SMALL: f32 = 24.0;
+/// The home actions. Tall enough to read as the page's buttons, still a pill.
+pub(crate) const CONTROL_HEIGHT_LARGE: f32 = 44.0;
 pub(crate) const KEYCAP_WIDTH: f32 = 34.0;
 /// The narrowest a settings row's title and description get before its
 /// control wraps below them.
@@ -330,7 +357,7 @@ mod tests {
 
     #[test]
     fn type_scale_ascends() {
-        let steps = [CAPTION, FOOTNOTE, BODY, HEADLINE, TITLE];
+        let steps = [CAPTION, FOOTNOTE, BODY, HEADLINE, TITLE, DISPLAY];
         for pair in steps.windows(2) {
             assert!(pair[0].size < pair[1].size);
             assert!(pair[0].line_height < pair[1].line_height);

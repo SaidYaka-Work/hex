@@ -329,9 +329,9 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
 
 fn create_tray(commands: mpsc::Sender<TrayCommand>) -> Result<TrayIcon> {
     let menu = Menu::new();
-    let show = MenuItem::with_id("show", tr("Show Hex"), true, None);
+    let show = MenuItem::with_id("show", tr("Show Said.ai"), true, None);
     let toggle = MenuItem::with_id("toggle", tr("Enable / Disable Hex"), true, None);
-    let quit = MenuItem::with_id("quit", tr("Quit Hex"), true, None);
+    let quit = MenuItem::with_id("quit", tr("Quit Said.ai"), true, None);
     menu.append(&show)?;
     menu.append(&toggle)?;
     menu.append(&quit)?;
@@ -362,7 +362,7 @@ fn create_tray(commands: mpsc::Sender<TrayCommand>) -> Result<TrayIcon> {
     }));
 
     Ok(TrayIconBuilder::new()
-        .with_tooltip(tr("Hex Dictation"))
+        .with_tooltip(tr("Said.ai Dictation"))
         .with_icon(tray_icon()?)
         .with_menu(Box::new(menu))
         // Left click shows the window (handled above); only right click

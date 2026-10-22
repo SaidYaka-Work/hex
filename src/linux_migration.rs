@@ -130,16 +130,13 @@ mod tests {
         let path = directory.join("settings.json");
         crate::app_settings::migrate_legacy_settings(&path).unwrap();
         let settings = AppSettings::load_from(&path).unwrap();
-        use crate::transcription_models::{TranscriptionModelId, definition, is_installed};
-        let expected = if is_installed(
-            definition(TranscriptionModelId::ParakeetUnifiedEnglish),
-            "en",
-        ) {
-            TranscriptionModelId::ParakeetUnifiedEnglish
-        } else {
-            TranscriptionModelId::ParakeetV3
-        };
-        assert_eq!(settings.transcription.model, expected);
+        // Load pins every saved selection to Parakeet English, installed or not.
+        // The first-run tour downloads that model.
+        assert_eq!(
+            settings.transcription.model,
+            crate::transcription_models::TranscriptionModelId::ParakeetUnifiedEnglish
+        );
+        assert_eq!(settings.transcription.language, "en");
         let _ = fs::remove_dir_all(directory);
     }
 
