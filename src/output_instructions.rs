@@ -59,6 +59,8 @@ pub enum InstructionEvent {
     CloudNotice,
     /// The focused window could not be confirmed, so the text is on the clipboard.
     Copied,
+    /// The text is on the clipboard because Said.ai was focused, or focus moved.
+    CopiedAnywhere,
 }
 
 impl InstructionEvent {
@@ -81,6 +83,7 @@ impl InstructionEvent {
                 "Talk to AI sends what you say, and any selected text, to our AI service."
             }
             Self::Copied => "Copied to the clipboard. Said.ai could not see the focused window.",
+            Self::CopiedAnywhere => "Copied – paste anywhere.",
         }
     }
 }
@@ -99,6 +102,13 @@ struct PersistentFile {
     selection_notice_shown: bool,
     #[serde(default)]
     cloud_notice_acknowledged: bool,
+    /// Session chips, so the settings window and the listener share them.
+    #[serde(default)]
+    session: Vec<String>,
+    #[serde(default)]
+    event: Option<String>,
+    #[serde(default)]
+    event_at: u64,
 }
 
 struct Store {
@@ -110,6 +120,8 @@ struct Store {
     selection_notice_shown: bool,
     selection_notice_pending: bool,
     cloud_notice_acknowledged: bool,
+    event_at: u64,
+    disk_stamp: Option<(std::time::SystemTime, u64)>,
 }
 
 impl Store {
@@ -123,6 +135,8 @@ impl Store {
             selection_notice_shown: false,
             selection_notice_pending: false,
             cloud_notice_acknowledged: false,
+            event_at: 0,
+            disk_stamp: None,
         }
     }
 }
@@ -152,12 +166,60 @@ pub enum PasteDelivery {
 }
 
 pub fn paste_delivery(start: &FocusRead, now: &FocusRead) -> PasteDelivery {
+    // Finishing while Said.ai is frontmost must not type into this window.
+    if focus_is_self(now) {
+        return PasteDelivery::Clipboard;
+    }
     match (start, now) {
         (FocusRead::App(start), FocusRead::App(now)) if start == now => PasteDelivery::Paste,
         (FocusRead::App(_), FocusRead::App(_)) => PasteDelivery::Skip,
         (FocusRead::App(_), FocusRead::None) => PasteDelivery::Skip,
         _ => PasteDelivery::Clipboard,
     }
+}
+
+/// Said.ai's own process, by the names each platform reports for this app.
+pub fn focus_is_self(focus: &FocusRead) -> bool {
+    let FocusRead::App(name) = focus else {
+        return false;
+    };
+    let name = name.trim().to_ascii_lowercase();
+    const OWN: &[&str] = &[
+        "said.ai",
+        "said",
+        "hex",
+        "hex-service",
+        "voice-control",
+        "voice-control-watch",
+    ];
+    if OWN.contains(&name.as_str()) {
+        return true;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
+        })
+        .is_some_and(|stem| stem == name)
+}
+
+/// Copy instead of pasting when the focused app is Said.ai, or when a home
+/// click finished on a platform that cannot see the focused window.
+pub fn should_copy_instead(focus: &FocusRead) -> bool {
+    focus_is_self(focus)
+        || (crate::home_capture::from_home_click()
+            && matches!(focus, FocusRead::Unreadable | FocusRead::None))
+}
+
+/// Copy `text` and remember a notice. Returns whether the caller should skip paste.
+pub fn copy_for_self(text: &str, focus: &FocusRead) -> bool {
+    if !should_copy_instead(focus) {
+        return false;
+    }
+    let _ = copy_result(text);
+    note_event(InstructionEvent::CopiedAnywhere);
+    true
 }
 
 struct AiJob {
@@ -178,6 +240,8 @@ fn bump() {
 }
 
 pub fn revision() -> u64 {
+    // Pull a file another process wrote before reporting the revision.
+    with_store(|_| ());
     REVISION.load(Ordering::Acquire)
 }
 
@@ -197,7 +261,7 @@ pub fn last_event() -> Option<InstructionEvent> {
     with_store(|state| state.event)
 }
 
-/// Drop one chip. Persistent removals are written; session removals are not.
+/// Drop one chip. The file is rewritten so the other process sees it.
 pub fn dismiss(scope: InstructionScope, text: &str) {
     with_store(|state| {
         let changed = match scope {
@@ -209,15 +273,13 @@ pub fn dismiss(scope: InstructionScope, text: &str) {
             InstructionScope::Persistent => {
                 let before = state.persistent.len();
                 state.persistent.retain(|item| item != text);
-                let changed = state.persistent.len() != before;
-                if changed {
-                    save_state(state);
-                }
-                changed
+                state.persistent.len() != before
             }
         };
         if changed {
             state.event = None;
+            state.event_at = 0;
+            save_state(state);
             bump();
         }
     });
@@ -327,14 +389,27 @@ fn worker_sender() -> Sender<AiJob> {
                         if (job.cancelled)() || inflight_cancelled() {
                             continue;
                         }
+                        if outcome.event == InstructionEvent::CloudNotice {
+                            request_home_reveal();
+                        }
                         if let Some(text) = outcome.paste.filter(|text| !text.trim().is_empty()) {
-                            match paste_delivery(&job.focus, &(job.focus_now)()) {
+                            let now = (job.focus_now)();
+                            match paste_delivery(&job.focus, &now) {
                                 PasteDelivery::Paste => (job.paste)(text),
                                 PasteDelivery::Clipboard => {
                                     let _ = copy_result(&text);
-                                    note_copied();
+                                    note_event(if focus_is_self(&now) {
+                                        InstructionEvent::CopiedAnywhere
+                                    } else {
+                                        InstructionEvent::Copied
+                                    });
                                 }
-                                PasteDelivery::Skip => {}
+                                // Focus moved. Keep the text on the clipboard
+                                // instead of dropping it.
+                                PasteDelivery::Skip => {
+                                    let _ = copy_result(&text);
+                                    note_event(InstructionEvent::CopiedAnywhere);
+                                }
                             }
                         }
                     }
@@ -448,18 +523,21 @@ fn decision_from_turn(turn: ModelTurn, spoken: &str, has_source: bool) -> Decisi
         ModelAction::ClearSession => Decision::clear(InstructionEvent::ClearedSession),
         ModelAction::ClearPersistent => Decision::clear(InstructionEvent::ClearedPersistent),
         ModelAction::ClearAll => Decision::clear(InstructionEvent::ClearedAll),
+        ModelAction::ApplyOnce
+            if instruction_only(spoken) || (!has_source && is_one_shot(&normalize(spoken))) =>
+        {
+            // A one-off with nothing selected, or an instruction the model
+            // labeled apply-once, is remembered as a session chip.
+            style_decision(spoken, filled(turn.instruction, spoken))
+        }
         ModelAction::ApplyOnce => {
-            let paste = (!instruction_only(spoken) && has_source)
-                .then_some(paste_text)
-                .flatten();
+            let paste = has_source.then_some(paste_text).flatten();
             let applied = paste.is_some();
             Decision {
                 store: None,
                 paste,
                 event: if applied {
                     InstructionEvent::Applied
-                } else if instruction_only(spoken) {
-                    InstructionEvent::SessionUpdated
                 } else {
                     InstructionEvent::NoTextYet
                 },
@@ -597,11 +675,68 @@ pub fn inflight_cancelled() -> bool {
     INFLIGHT_CANCEL.load(Ordering::Acquire)
 }
 
-fn note_copied() {
+fn note_event(event: InstructionEvent) {
     with_store(|state| {
-        state.event = Some(InstructionEvent::Copied);
+        state.event = Some(event);
+        state.event_at = unix_now();
+        save_state(state);
         bump();
     });
+}
+
+static REVEAL_HOME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ask the running window to come forward. The Linux service also opens the
+/// window from its own loop, because this flag does not cross processes.
+pub fn request_home_reveal() {
+    REVEAL_HOME.store(true, Ordering::Release);
+}
+
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub fn take_home_reveal() -> bool {
+    REVEAL_HOME.swap(false, Ordering::AcqRel)
+}
+
+/// The settings window touches this while it is open so the listener can
+/// avoid launching a second window.
+pub fn touch_window_heartbeat() {
+    #[cfg(not(test))]
+    {
+        let path = persist_path()
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("settings-heartbeat");
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(path, b"1");
+    }
+}
+
+pub fn window_heartbeat_fresh() -> bool {
+    #[cfg(test)]
+    {
+        false
+    }
+    #[cfg(not(test))]
+    {
+        let path = persist_path()
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("settings-heartbeat");
+        fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age < std::time::Duration::from_secs(2))
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn copy_result(text: &str) -> bool {
@@ -687,12 +822,13 @@ fn apply_decision(decision: Decision) -> InstructionOutcome {
         if let Some(op) = store {
             if op.persistent {
                 store_phrase(&mut state.persistent, op.text, op.append);
-                save_state(state);
             } else {
                 store_phrase(&mut state.session, op.text, op.append);
             }
         }
         state.event = Some(event);
+        state.event_at = unix_now();
+        save_state(state);
         bump();
         InstructionOutcome { paste, event }
     })
@@ -731,18 +867,41 @@ fn store_phrase(list: &mut Vec<String>, phrase: String, append: bool) {
 }
 
 fn ensure_loaded(state: &mut Store) {
-    if state.loaded {
+    let path = persist_path();
+    let stamp = file_stamp(&path);
+    if state.loaded && state.disk_stamp == stamp {
         return;
     }
-    state.loaded = true;
     let file = load_file();
+    let session: Vec<String> = file.session.iter().map(|item| bound(item)).collect();
+    let persistent: Vec<String> = file.instructions.iter().map(|item| bound(item)).collect();
+    let event = file
+        .event
+        .as_deref()
+        .and_then(event_from_name)
+        .filter(|_| unix_now().saturating_sub(file.event_at) < 60);
+    let was_loaded = state.loaded;
+    let changed = was_loaded
+        && (state.session != session
+            || state.persistent != persistent
+            || state.cloud_notice_acknowledged != file.cloud_notice_acknowledged
+            || state.event != event);
     state.selection_notice_shown = file.selection_notice_shown;
     state.cloud_notice_acknowledged = file.cloud_notice_acknowledged;
-    state.persistent = file
-        .instructions
-        .into_iter()
-        .map(|item| bound(&item))
-        .collect();
+    state.session = session;
+    state.persistent = persistent;
+    state.event = event;
+    state.event_at = file.event_at;
+    state.loaded = true;
+    state.disk_stamp = stamp;
+    if changed || (!was_loaded && event.is_some()) {
+        bump();
+    }
+}
+
+fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 fn persist_path() -> PathBuf {
@@ -770,20 +929,59 @@ fn load_file() -> PersistentFile {
     serde_json::from_slice::<PersistentFile>(&bytes).unwrap_or_default()
 }
 
-fn save_state(state: &Store) {
+fn save_state(state: &mut Store) {
     let path = persist_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let file = PersistentFile {
         instructions: state.persistent.clone(),
+        session: state.session.clone(),
         selection_notice_shown: state.selection_notice_shown,
         cloud_notice_acknowledged: state.cloud_notice_acknowledged,
+        event: state.event.map(|event| event_name(event).to_string()),
+        event_at: state.event_at,
     };
     let Ok(bytes) = serde_json::to_vec_pretty(&file) else {
         return;
     };
     atomic_write(&path, &bytes);
+    state.disk_stamp = file_stamp(&path);
+}
+
+fn event_name(event: InstructionEvent) -> &'static str {
+    match event {
+        InstructionEvent::SessionUpdated => "session",
+        InstructionEvent::PersistentUpdated => "persistent",
+        InstructionEvent::ClearedSession => "cleared_session",
+        InstructionEvent::ClearedPersistent => "cleared_persistent",
+        InstructionEvent::ClearedAll => "cleared_all",
+        InstructionEvent::Applied => "applied",
+        InstructionEvent::WaitingForModel => "waiting",
+        InstructionEvent::RequestFailed => "failed",
+        InstructionEvent::NoTextYet => "no_text",
+        InstructionEvent::CloudNotice => "cloud_notice",
+        InstructionEvent::Copied => "copied",
+        InstructionEvent::CopiedAnywhere => "copied_anywhere",
+    }
+}
+
+fn event_from_name(name: &str) -> Option<InstructionEvent> {
+    Some(match name {
+        "session" => InstructionEvent::SessionUpdated,
+        "persistent" => InstructionEvent::PersistentUpdated,
+        "cleared_session" => InstructionEvent::ClearedSession,
+        "cleared_persistent" => InstructionEvent::ClearedPersistent,
+        "cleared_all" => InstructionEvent::ClearedAll,
+        "applied" => InstructionEvent::Applied,
+        "waiting" => InstructionEvent::WaitingForModel,
+        "failed" => InstructionEvent::RequestFailed,
+        "no_text" => InstructionEvent::NoTextYet,
+        "cloud_notice" => InstructionEvent::CloudNotice,
+        "copied" => InstructionEvent::Copied,
+        "copied_anywhere" => InstructionEvent::CopiedAnywhere,
+        _ => return None,
+    })
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) {
@@ -1335,6 +1533,12 @@ mod tests {
             PasteDelivery::Paste
         );
         assert_eq!(
+            paste_delivery(&FocusRead::App("hex".into()), &FocusRead::App("hex".into())),
+            PasteDelivery::Clipboard
+        );
+        assert!(focus_is_self(&FocusRead::App("Said.ai".into())));
+        assert!(!focus_is_self(&FocusRead::App("notes".into())));
+        assert_eq!(
             paste_delivery(
                 &FocusRead::App("notes".into()),
                 &FocusRead::App("browser".into())
@@ -1348,6 +1552,48 @@ mod tests {
         assert_eq!(
             paste_delivery(&FocusRead::App("notes".into()), &FocusRead::Unreadable),
             PasteDelivery::Clipboard
+        );
+    }
+
+    #[test]
+    fn a_changed_instruction_file_is_reread() {
+        isolated(|| {
+            assert!(!cloud_notice_outstanding());
+            let path = persist_path();
+            fs::write(
+                &path,
+                r#"{"instructions":["formal"],"session":["spanish"],"cloud_notice_acknowledged":false}"#,
+            )
+            .unwrap();
+            assert!(cloud_notice_outstanding());
+            let lines = active();
+            assert!(lines.iter().any(|item| item.text == "formal"));
+            assert!(lines.iter().any(|item| item.text == "spanish"));
+        });
+    }
+
+    #[test]
+    fn an_apply_once_without_a_selection_is_stored_for_the_session() {
+        isolated_with(
+            crate::llm_backend::begin_mock("test-key", |_| {
+                let content = serde_json::json!({
+                    "action": "apply_once",
+                    "instruction": "for now write formally",
+                    "append": false,
+                    "text": "rewritten beside the original",
+                })
+                .to_string();
+                Ok(crate::llm_backend::MockReply {
+                    status: 200,
+                    body: crate::llm_backend::chat_json(&content),
+                })
+            }),
+            || {
+                let outcome = accept("for now write formally", None);
+                assert!(outcome.paste.is_none());
+                assert_eq!(outcome.event, InstructionEvent::SessionUpdated);
+                assert_eq!(active().len(), 1);
+            },
         );
     }
 

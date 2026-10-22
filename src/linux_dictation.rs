@@ -104,7 +104,9 @@ impl DictationOutput {
         if processed.text.trim().is_empty() {
             return Err(eyre!("text replacements produced empty output"));
         }
-        paster.paste(&processed.text)?;
+        if !crate::output_instructions::copy_for_self(&processed.text, &linux_focus()) {
+            paster.paste(&processed.text)?;
+        }
         if let Some(history) = &self.history {
             let draft = crate::dictation_modes::history_draft(
                 raw_text,
@@ -192,11 +194,16 @@ pub fn run(
                 OutputJob::Dictation(job) => (job, OutputKind::Dictation),
                 OutputJob::VoiceAction(job) => (job, OutputKind::VoiceAction),
                 OutputJob::DeferredPaste(text) => {
-                    let result = paster
-                        .as_mut()
-                        .map_err(|error| eyre!("{error:#}"))
-                        .and_then(|paster| paster.paste(&text).map(|()| text))
-                        .map_err(|error| format!("{error:#}"));
+                    let result = if crate::output_instructions::copy_for_self(&text, &linux_focus())
+                    {
+                        Ok(text)
+                    } else {
+                        paster
+                            .as_mut()
+                            .map_err(|error| eyre!("{error:#}"))
+                            .and_then(|paster| paster.paste(&text).map(|()| text))
+                            .map_err(|error| format!("{error:#}"))
+                    };
                     if result_sender
                         .send((OutputKind::VoiceAction, result))
                         .is_err()
@@ -378,6 +385,7 @@ pub fn run(
                 HotkeyEvent::Start | HotkeyEvent::VoiceStart
                     if !capture.is_recording() && !start_pending =>
                 {
+                    crate::home_capture::note_hotkey_origin();
                     ai_cancel.store(false, Ordering::Release);
                     crate::output_instructions::clear_inflight_cancel();
                     recording_voice = action == HotkeyEvent::VoiceStart;
@@ -499,14 +507,23 @@ pub fn run(
                 crate::home_capture::HomeRequest::Talk
             },
         ));
+        let thinking = crate::llm_backend::is_thinking();
+        let notice = !capture.is_recording()
+            && !thinking
+            && crate::output_instructions::cloud_notice_outstanding()
+            && crate::output_instructions::last_event()
+                == Some(crate::output_instructions::InstructionEvent::CloudNotice);
+        reveal_settings_window(notice);
         indicator.update(
             capture.is_recording() || start_pending,
             pending,
-            crate::llm_backend::is_thinking(),
-            &hud_caption(
-                capture.is_recording() || start_pending,
-                crate::llm_backend::is_thinking(),
-            ),
+            thinking,
+            notice,
+            &if notice {
+                crate::desktop_i18n::tr("Open Said.ai to continue").to_string()
+            } else {
+                hud_caption(capture.is_recording() || start_pending, thinking)
+            },
         );
         match input.recv_timeout(UPDATE_INTERVAL, !capture.is_recording()) {
             RecoveringAudioInputEvent::Chunk {
@@ -586,7 +603,7 @@ pub fn run(
         capture.cancel();
         events.dictation(DictationPhase::Cancelled, "")?;
     }
-    indicator.update(false, pending, false, "");
+    indicator.update(false, pending, false, false, "");
     suppressor.restore();
     emit_state(&mut events, VoiceState::Stopping, &device_label)?;
     output.stop.store(true, Ordering::Release);
@@ -637,6 +654,32 @@ fn linux_focus() -> crate::output_instructions::FocusRead {
     match crate::linux_context::capture().application {
         Some(application) => crate::output_instructions::FocusRead::App(application),
         None => crate::output_instructions::FocusRead::None,
+    }
+}
+
+fn reveal_settings_window(notice: bool) {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if !notice {
+        STARTED.store(false, Ordering::Release);
+        return;
+    }
+    if crate::output_instructions::window_heartbeat_fresh() {
+        return;
+    }
+    if STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    spawn_settings_window();
+}
+
+fn spawn_settings_window() {
+    #[cfg(not(test))]
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
 }
 

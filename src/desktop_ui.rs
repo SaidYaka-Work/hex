@@ -1008,11 +1008,11 @@ pub(crate) fn vector_icon(svg: &'static str, size: f32, color: u32) -> AnyElemen
 }
 
 pub(crate) fn home_mic_icon(color: u32) -> AnyElement {
-    vector_icon(HOME_MIC_SVG, 20.0, color)
+    vector_icon(HOME_MIC_SVG, HOME_ICON_SIZE, color)
 }
 
 pub(crate) fn home_sparkle_icon(color: u32) -> AnyElement {
-    vector_icon(HOME_SPARKLE_SVG, 20.0, color)
+    vector_icon(HOME_SPARKLE_SVG, HOME_ICON_SIZE, color)
 }
 
 fn orb_halo(diameter: f32, alpha: u32) -> Div {
@@ -1027,47 +1027,59 @@ fn orb_halo(diameter: f32, alpha: u32) -> Div {
 /// microphone root-mean-square, from 0 to 1. Reduced motion keeps the disc
 /// still and only lets a loud microphone make it larger.
 pub(crate) fn voice_orb(mood: OrbMood, level: f32) -> AnyElement {
+    voice_orb_sized(mood, level, ORB_GLOW)
+}
+
+/// A shorter orb for the cloud notice, so Continue stays inside the window
+/// and the header row is not covered.
+pub(crate) fn voice_orb_compact(mood: OrbMood, level: f32) -> AnyElement {
+    voice_orb_sized(mood, level, 112.0)
+}
+
+fn voice_orb_sized(mood: OrbMood, level: f32, glow: f32) -> AnyElement {
     let level = level.clamp(0.0, 1.0);
     let loud = match mood {
         OrbMood::Listening => 1.0 + (0.16 * level.max(0.12)),
         OrbMood::Thinking | OrbMood::Idle => 1.0,
     };
+    let scale = glow / ORB_GLOW;
     let orb = div()
         .relative()
-        .size(px(ORB_GLOW))
+        .size(px(glow))
         .flex()
         .items_center()
         .justify_center()
+        .overflow_hidden()
         .child(
             div()
                 .absolute()
-                .size(px(ORB_GLOW))
+                .size(px(glow))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(orb_halo(ORB_GLOW, 0x14)),
+                .child(orb_halo(ORB_GLOW * scale, 0x14)),
         )
         .child(
             div()
                 .absolute()
-                .size(px(ORB_GLOW))
+                .size(px(glow))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(orb_halo(ORB_SIZE * 2.1, 0x22)),
+                .child(orb_halo(ORB_SIZE * 2.1 * scale, 0x22)),
         )
         .child(
             div()
                 .absolute()
-                .size(px(ORB_GLOW))
+                .size(px(glow))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(orb_halo(ORB_SIZE * 1.4, 0x38)),
+                .child(orb_halo(ORB_SIZE * 1.4 * scale, 0x38)),
         )
         .child(
             div()
-                .size(px(ORB_SIZE * loud))
+                .size(px(ORB_SIZE * loud * scale))
                 .rounded_full()
                 .bg(linear_gradient(
                     160.0,
@@ -1104,19 +1116,41 @@ pub(crate) fn voice_orb(mood: OrbMood, level: f32) -> AnyElement {
     .into_any_element()
 }
 
-/// One of the two home actions. `filled` is the terracotta Talk card.
-/// `emphasis` moves from 0 to 1 over the snap spring while that card is live.
-pub(crate) fn action_card(filled: bool, emphasis: f32) -> Div {
-    let emphasis = emphasis.clamp(0.0, 1.0);
-    let hairline = gpui::rgba((paint(TEXT_PRIMARY) << 8) | 0x1a);
-    let hot = rgb(paint(if filled { ON_ACCENT } else { ACCENT }));
-    let border = mix_color(hairline, hot, emphasis);
-    let fill = if filled {
-        rgb(paint(ACCENT))
+/// Which home card is live. At rest every card is neutral; the fill follows
+/// `emphasis` from 0 to 1 over [`SPRING_QUICK`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CardFill {
+    Rest,
+    Talk,
+    Ai,
+}
+
+/// One of the two home actions. Idle cards stay on the paper surface. Talk
+/// fills with terracotta (peach in the dark theme, with dark ink). Talk to AI
+/// warms its surface. Hover lifts the card; the colour move is the spring.
+pub(crate) fn action_card(fill: CardFill, emphasis: f32) -> Div {
+    let emphasis = if fill == CardFill::Rest {
+        0.0
     } else {
-        mix_color(rgb(paint(SURFACE)), rgb(paint(ACCENT_SURFACE)), emphasis)
+        emphasis.clamp(0.0, 1.0)
     };
-    let card = div()
+    let rest_fill = rgb(paint(SURFACE));
+    let rest_border = gpui::rgba((paint(TEXT_PRIMARY) << 8) | 0x1a);
+    let rest_text = rgb(paint(TEXT_PRIMARY));
+    let (target_fill, target_border, target_text) = match fill {
+        CardFill::Talk => (
+            rgb(paint(ACCENT)),
+            rgb(paint(ACCENT)),
+            rgb(paint(ON_ACCENT)),
+        ),
+        CardFill::Ai => (
+            rgb(paint(ACCENT_SURFACE)),
+            rgb(paint(ACCENT)),
+            rgb(paint(TEXT_PRIMARY)),
+        ),
+        CardFill::Rest => (rest_fill, rest_border, rest_text),
+    };
+    div()
         .flex_1()
         .h(px(ACTION_CARD_HEIGHT))
         .p_3()
@@ -1125,38 +1159,46 @@ pub(crate) fn action_card(filled: bool, emphasis: f32) -> Div {
         .justify_between()
         .rounded(RADIUS_CARD)
         .border_1()
-        .border_color(border)
-        .bg(fill)
+        .border_color(mix_color(rest_border, target_border, emphasis))
+        .bg(mix_color(rest_fill, target_fill, emphasis))
+        .text_color(mix_color(rest_text, target_text, emphasis))
         .shadow_lg()
         .cursor_pointer()
-        .hover(|card| {
-            card.bg(if filled {
-                mix_color(rgb(paint(ACCENT)), rgb(paint(ORB_WARM)), 0.18)
+        .hover(move |card| {
+            let card = card.mt(px(-2.0));
+            if fill == CardFill::Rest || emphasis < 0.35 {
+                card.bg(rgb(paint(SURFACE_HOVER)))
             } else {
-                rgb(paint(SURFACE_HOVER))
-            })
-        });
-    if filled {
-        card.text_color(rgb(paint(ON_ACCENT)))
-    } else {
-        card.text_color(rgb(paint(TEXT_PRIMARY)))
-    }
+                card
+            }
+        })
 }
 
-/// A small amber status, for a condition the person cannot fix in the window.
-pub(crate) fn status_pill(label: impl IntoElement) -> Div {
+/// Shortcut caps small enough to sit under a home card.
+pub(crate) fn compact_keycaps(parts: Vec<String>) -> AnyElement {
     div()
-        .h(px(CONTROL_HEIGHT_SMALL))
-        .px_3()
         .flex()
-        .flex_none()
         .items_center()
-        .rounded(RADIUS_PILL)
-        .bg(rgb(paint(WARNING_SURFACE)))
-        .text_caption()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(paint(WARNING)))
-        .child(label)
+        .justify_center()
+        .gap(px(3.0))
+        .children(parts.into_iter().map(|part| {
+            let (_, label) = split_sided_keycap(&part);
+            div()
+                .min_w(px(HOME_KEYCAP_MIN))
+                .h(px(HOME_KEYCAP_HEIGHT))
+                .px_2()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(RADIUS_SMALL)
+                .border_1()
+                .border_color(rgb(paint(LINE_STRONG)))
+                .bg(rgb(paint(SURFACE)))
+                .text_caption()
+                .text_color(rgb(paint(TEXT_TERTIARY)))
+                .child(label)
+        }))
+        .into_any_element()
 }
 
 /// A removable instruction chip. The caller adds the close button.

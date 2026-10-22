@@ -64,6 +64,11 @@ pub mod presets {
         duration: 0.1,
         bounce: 0.0,
     };
+    /// Home cards answering a recording or thinking change, about 150 ms.
+    pub const QUICK: Spec = Spec {
+        duration: 0.15,
+        bounce: 0.0,
+    };
     /// Small controls answering a click: indicators, toggles, widths that lead, exits.
     pub const SNAP: Spec = Spec {
         duration: 0.25,

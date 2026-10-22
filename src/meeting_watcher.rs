@@ -1040,6 +1040,11 @@ async fn drive_ui(
             let _ = cx.update(|_| crate::status_item::update_meeting(&meeting_state, enabled));
             meeting_menu_refresh_at = Instant::now() + Duration::from_millis(500);
         }
+        if crate::output_instructions::take_home_reveal() {
+            let _ = cx.update(|cx| {
+                let _ = ui.open_or_focus(cx);
+            });
+        }
         Timer::after(Duration::from_millis(16)).await;
     }
 }

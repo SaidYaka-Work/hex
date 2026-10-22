@@ -11,18 +11,18 @@
 //! 1. Baked [`LLM_SLOT`].
 //! 2. When `SAID_AI_CONFIG_URL` is an https URL, a small JSON document is
 //!    fetched once on a background thread and cached as `ai-slot.json`.
-//!    Remote config can change `base_url` and `model` only. It cannot change
-//!    which environment variable holds the key. The host must be on
-//!    [`ALLOWED_HOSTS`], and the document must carry an ed25519 signature
-//!    under [`SLOT_PUBLIC_KEY`]. An unsigned, invalid, or off-list document
-//!    is ignored. The cache is checked with the same rules.
+//!    Remote config can change `base_url` and `model` only. It cannot name
+//!    the key. The host must be on [`ALLOWED_HOSTS`]. The document carries
+//!    `version`, `issued_at`, `expires_at`, and an ed25519 signature under
+//!    [`SLOT_PUBLIC_KEY`] over those fields plus the base URL and model.
+//!    Unsigned, expired, replayed (older than the cache), or off-list
+//!    documents are ignored. The cache is checked with the same rules.
 //! 3. `SAID_AI_BASE_URL` and `SAID_AI_MODEL` override that result. The base
-//!    URL still has to be an allowlisted host. `SAID_AI_KEY_VARIABLE` is a
-//!    local override of the key's variable name and is never taken from the
-//!    network.
+//!    URL still has to be an allowlisted host. There is no key-variable override.
 //!
-//! The key itself stays behind [`api_key`]. Reading it does not load remote
-//! config, so the home can ask whether a key is present without blocking.
+//! Each allowlisted host has one key variable, baked in [`key_variable_for_host`].
+//! The key itself stays behind [`api_key`]. Asking whether a key is present
+//! does not load remote config, so the home does not block on a fetch.
 //! A small proxy at [`SAID_PROXY_HOST`] would keep both the key and the model
 //! id out of the binary. That proxy is not running yet; the host is only an
 //! allowlist placeholder. The private key that matches [`SLOT_PUBLIC_KEY`] is
@@ -52,15 +52,15 @@ pub struct LlmSlot {
     /// OpenAI-compatible origin, without `/chat/completions`.
     pub base_url: &'static str,
     pub model: &'static str,
-    /// Environment variable that holds the bearer token.
-    pub key_variable: &'static str,
 }
 
 pub const LLM_SLOT: LlmSlot = LlmSlot {
     base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
     model: "gemini-3.5-flash-lite",
-    key_variable: "GEMINI_API_KEY",
 };
+
+/// Key variable for the future proxy at [`SAID_PROXY_HOST`]. Not read from config.
+pub const SAID_PROXY_KEY_VARIABLE: &str = "SAID_AI_API_KEY";
 
 /// Future owner-controlled proxy. Remote config may name this host. Nothing
 /// is deployed here yet; a proxy would hold the key and the model id.
@@ -76,9 +76,12 @@ const ALLOWED_HOSTS: &[&str] = &[
 /// Ed25519 public key for remote slot documents. The matching private key is
 /// not in the repository. Unsigned or invalid documents are ignored.
 const SLOT_PUBLIC_KEY: [u8; 32] = [
-    0xee, 0x8d, 0xf2, 0x24, 0xe7, 0x5a, 0xe0, 0xb4, 0x34, 0xc8, 0x29, 0x5a, 0x8f, 0x44, 0x4f, 0xa8,
-    0xf9, 0x21, 0x96, 0xc6, 0x16, 0xa5, 0x29, 0x16, 0x60, 0x57, 0x53, 0x18, 0xee, 0x3c, 0x7c, 0x25,
+    0x27, 0x21, 0xe1, 0x78, 0x41, 0x4e, 0xce, 0x2f, 0xda, 0x0b, 0x58, 0x8a, 0xaa, 0xe3, 0x32, 0x40,
+    0x89, 0x81, 0xd5, 0x84, 0x65, 0x41, 0xf8, 0xcf, 0x70, 0xc2, 0x4c, 0xb5, 0x15, 0x27, 0x78, 0x14,
 ];
+
+/// A signed slot issued more than this far in the future is rejected.
+const SLOT_CLOCK_SKEW: u64 = 300;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(not(test))]
@@ -128,10 +131,28 @@ struct ResolvedSlot {
 struct SlotFile {
     base_url: String,
     model: String,
-    /// Present on older caches. Remote config must not choose the key variable.
+    /// Ignored. The key variable is chosen from the host, never from this file.
     #[serde(default)]
     key_variable: Option<String>,
     #[serde(default)]
+    signature: String,
+    #[serde(default)]
+    version: u64,
+    /// Unix seconds. Covered by the signature.
+    #[serde(default)]
+    issued_at: u64,
+    /// Unix seconds. Covered by the signature. An expired document is ignored.
+    #[serde(default)]
+    expires_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SignedSlot {
+    base_url: String,
+    model: String,
+    version: u64,
+    issued_at: u64,
+    expires_at: u64,
     signature: String,
 }
 
@@ -164,11 +185,25 @@ pub fn warm_slot() {
     }
 }
 
-/// `true` when the key variable holds a usable value.
+/// `true` when the key for the current host holds a usable value.
 ///
 /// This reads the environment only. It does not fetch or wait for remote config.
+/// Until a slot has loaded, the baked Google host is the one that is checked.
 pub fn api_key_present() -> bool {
-    api_key().is_some()
+    #[cfg(test)]
+    {
+        api_key().is_some()
+    }
+    #[cfg(not(test))]
+    {
+        let Some(name) = key_variable_for_host(peeked_host()) else {
+            return false;
+        };
+        std::env::var(name)
+            .ok()
+            .and_then(|value| usable_key(&value))
+            .is_some()
+    }
 }
 
 /// One JSON chat completion. A missing key, a failed call, or cancellation
@@ -250,6 +285,12 @@ fn baked_slot() -> ResolvedSlot {
     }
 }
 
+#[cfg(not(test))]
+fn slot_cell() -> &'static OnceLock<ResolvedSlot> {
+    static SLOT: OnceLock<ResolvedSlot> = OnceLock::new();
+    &SLOT
+}
+
 fn resolved_slot() -> ResolvedSlot {
     #[cfg(test)]
     {
@@ -257,8 +298,24 @@ fn resolved_slot() -> ResolvedSlot {
     }
     #[cfg(not(test))]
     {
-        static SLOT: OnceLock<ResolvedSlot> = OnceLock::new();
-        SLOT.get_or_init(load_slot).clone()
+        slot_cell().get_or_init(load_slot).clone()
+    }
+}
+
+/// Host used by the home badge. A slot that is still loading stays on the
+/// baked host so render does not wait for the network.
+#[cfg_attr(test, allow(dead_code))]
+fn peeked_host() -> &'static str {
+    #[cfg(test)]
+    {
+        "generativelanguage.googleapis.com"
+    }
+    #[cfg(not(test))]
+    {
+        slot_cell()
+            .get()
+            .and_then(|slot| static_host(&slot.base_url))
+            .unwrap_or("generativelanguage.googleapis.com")
     }
 }
 
@@ -289,23 +346,70 @@ fn fetch_remote_slot() -> Option<ResolvedSlot> {
     }
 }
 
-/// Accept a remote or cached slot document. `key_variable` is ignored.
-/// The signature covers `base_url + "\n" + model`.
+/// Accept a remote slot document. `key_variable` is ignored. A document older
+/// than the cached one is ignored so a replay cannot roll the slot back.
 fn accept_remote_slot(body: &str) -> Option<ResolvedSlot> {
+    let signed = validate_slot_document(body)?;
+    #[cfg(not(test))]
+    if let Some(cached) = read_cached_signed()
+        && !slot_supersedes(&signed, &cached)
+    {
+        return None;
+    }
+    #[cfg(not(test))]
+    write_cached_slot(&signed);
+    Some(ResolvedSlot {
+        base_url: signed.base_url,
+        model: signed.model,
+    })
+}
+
+fn validate_slot_document(body: &str) -> Option<SignedSlot> {
     let file: SlotFile = serde_json::from_str(body).ok()?;
     let _ = file.key_variable;
     let base_url = file.base_url.trim().trim_end_matches('/').to_string();
     let model = file.model.trim().to_string();
+    if file.version == 0 || file.issued_at == 0 || file.expires_at <= file.issued_at {
+        return None;
+    }
     if !base_url_allowed(&base_url) || !safe_token(&model) {
         return None;
     }
-    if !signature_valid(&base_url, &model, file.signature.trim()) {
+    let now = unix_now();
+    if file.issued_at > now.saturating_add(SLOT_CLOCK_SKEW) || now >= file.expires_at {
         return None;
     }
-    let slot = ResolvedSlot { base_url, model };
-    #[cfg(not(test))]
-    write_cached_slot(&slot, file.signature.trim());
-    Some(slot)
+    if !signature_valid(
+        file.version,
+        file.issued_at,
+        file.expires_at,
+        &base_url,
+        &model,
+        file.signature.trim(),
+    ) {
+        return None;
+    }
+    Some(SignedSlot {
+        base_url,
+        model,
+        version: file.version,
+        issued_at: file.issued_at,
+        expires_at: file.expires_at,
+        signature: file.signature.trim().to_string(),
+    })
+}
+
+/// `true` when `incoming` is the same document or a newer one.
+fn slot_supersedes(incoming: &SignedSlot, cached: &SignedSlot) -> bool {
+    incoming.version > cached.version
+        || (incoming.version == cached.version && incoming.issued_at >= cached.issued_at)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn base_url_allowed(url: &str) -> bool {
@@ -327,7 +431,14 @@ fn https_host(url: &str) -> Option<&str> {
     Some(host)
 }
 
-fn signature_valid(base_url: &str, model: &str, signature: &str) -> bool {
+fn signature_valid(
+    version: u64,
+    issued_at: u64,
+    expires_at: u64,
+    base_url: &str,
+    model: &str,
+    signature: &str,
+) -> bool {
     let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(signature) else {
         return false;
     };
@@ -337,8 +448,37 @@ fn signature_valid(base_url: &str, model: &str, signature: &str) -> bool {
     let Ok(key) = VerifyingKey::from_bytes(&SLOT_PUBLIC_KEY) else {
         return false;
     };
-    let message = format!("{base_url}\n{model}");
+    let message = slot_message(version, issued_at, expires_at, base_url, model);
     key.verify_strict(message.as_bytes(), &signature).is_ok()
+}
+
+fn slot_message(
+    version: u64,
+    issued_at: u64,
+    expires_at: u64,
+    base_url: &str,
+    model: &str,
+) -> String {
+    format!("{version}\n{issued_at}\n{expires_at}\n{base_url}\n{model}")
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn static_host(url: &str) -> Option<&'static str> {
+    let host = https_host(url)?;
+    ALLOWED_HOSTS
+        .iter()
+        .copied()
+        .find(|allowed| *allowed == host)
+}
+
+/// The one environment variable for an allowlisted host. Config cannot change this.
+pub(crate) fn key_variable_for_host(host: &str) -> Option<&'static str> {
+    match host {
+        "generativelanguage.googleapis.com" => Some("GEMINI_API_KEY"),
+        "openrouter.ai" => Some("OPENROUTER_API_KEY"),
+        SAID_PROXY_HOST => Some(SAID_PROXY_KEY_VARIABLE),
+        _ => None,
+    }
 }
 
 #[cfg(not(test))]
@@ -347,16 +487,23 @@ fn cached_slot_path() -> PathBuf {
 }
 
 #[cfg(not(test))]
-fn read_cached_slot() -> Option<ResolvedSlot> {
+fn read_cached_signed() -> Option<SignedSlot> {
     let bytes = std::fs::read(cached_slot_path()).ok()?;
     let body = String::from_utf8(bytes).ok()?;
-    // Re-check the host and the signature. Do not trust a file that only
-    // starts with https.
-    accept_remote_slot(&body)
+    validate_slot_document(&body)
 }
 
 #[cfg(not(test))]
-fn write_cached_slot(slot: &ResolvedSlot, signature: &str) {
+fn read_cached_slot() -> Option<ResolvedSlot> {
+    let signed = read_cached_signed()?;
+    Some(ResolvedSlot {
+        base_url: signed.base_url,
+        model: signed.model,
+    })
+}
+
+#[cfg(not(test))]
+fn write_cached_slot(slot: &SignedSlot) {
     let path = cached_slot_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -364,7 +511,10 @@ fn write_cached_slot(slot: &ResolvedSlot, signature: &str) {
     let bytes = serde_json::json!({
         "base_url": slot.base_url,
         "model": slot.model,
-        "signature": signature,
+        "version": slot.version,
+        "issued_at": slot.issued_at,
+        "expires_at": slot.expires_at,
+        "signature": slot.signature,
     })
     .to_string()
     .into_bytes();
@@ -407,14 +557,6 @@ fn usable_key(raw: &str) -> Option<String> {
     safe_token(raw.trim()).then(|| raw.trim().to_string())
 }
 
-fn key_variable_name() -> String {
-    #[cfg(not(test))]
-    if let Some(name) = env_token("SAID_AI_KEY_VARIABLE") {
-        return name;
-    }
-    LLM_SLOT.key_variable.to_string()
-}
-
 fn api_key() -> Option<String> {
     #[cfg(test)]
     {
@@ -427,7 +569,9 @@ fn api_key() -> Option<String> {
     }
     #[cfg(not(test))]
     {
-        std::env::var(key_variable_name())
+        let host = static_host(&resolved_slot().base_url)?;
+        let name = key_variable_for_host(host)?;
+        std::env::var(name)
             .ok()
             .and_then(|value| usable_key(&value))
     }
@@ -1057,14 +1201,56 @@ mod tests {
 
     #[test]
     fn a_signed_allowlisted_slot_is_accepted_without_its_key_variable() {
-        let signature = "sNYztw5Q5HcyLEe4L22tM0ARBz9brDXPED0KyuhrflXlbtsL2tXaok/VNxPc4Nonm+4/3vdnTeJE68mSOAdZDQ==";
+        let signature = "0y+6m6PLGxvEw1aHhoG+ygZ4GwFADZ11E4zdTMqJvb5jomsD3QanpcyTbnePKiTspbXvLRayCkb2VT8x/2G3Dw==";
         let body = format!(
-            r#"{{"base_url":"https://openrouter.ai/api/v1","model":"google/gemini-3.5-flash-lite","key_variable":"AWS_SECRET_ACCESS_KEY","signature":"{signature}"}}"#
+            r#"{{"base_url":"https://openrouter.ai/api/v1","model":"google/gemini-3.5-flash-lite","key_variable":"AWS_SECRET_ACCESS_KEY","version":2,"issued_at":1700000000,"expires_at":4102444800,"signature":"{signature}"}}"#
         );
         let slot = accept_remote_slot(&body).expect("signed slot");
         assert_eq!(slot.base_url, "https://openrouter.ai/api/v1");
         assert_eq!(slot.model, "google/gemini-3.5-flash-lite");
-        assert_eq!(key_variable_name(), LLM_SLOT.key_variable);
+        assert_eq!(
+            key_variable_for_host("openrouter.ai"),
+            Some("OPENROUTER_API_KEY")
+        );
+        assert_eq!(
+            key_variable_for_host("generativelanguage.googleapis.com"),
+            Some("GEMINI_API_KEY")
+        );
+        assert_eq!(
+            key_variable_for_host(SAID_PROXY_HOST),
+            Some(SAID_PROXY_KEY_VARIABLE)
+        );
+        assert!(key_variable_for_host("evil.example").is_none());
+    }
+
+    #[test]
+    fn an_expired_or_older_slot_is_rejected() {
+        let expired = r#"{"base_url":"https://openrouter.ai/api/v1","model":"google/gemini-3.5-flash-lite","version":2,"issued_at":1000,"expires_at":2000,"signature":"YHAM9qfoQv8qf6JpBY2uYZW4itsbe+JKim7Tx4ipSpY/cwbzxxioQyftCGryclI5Nxb+SFtwC60M7jYd1MK6BQ=="}"#;
+        assert!(accept_remote_slot(expired).is_none());
+        let older = SignedSlot {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "google/gemini-3.5-flash-lite".into(),
+            version: 1,
+            issued_at: 1_700_000_000,
+            expires_at: 4_102_444_800,
+            signature: String::new(),
+        };
+        let cached = SignedSlot {
+            version: 2,
+            issued_at: 1_700_000_000,
+            ..older.clone()
+        };
+        assert!(!slot_supersedes(&older, &cached));
+        let same = SignedSlot {
+            version: 2,
+            ..older.clone()
+        };
+        assert!(slot_supersedes(&same, &cached));
+        let newer = SignedSlot {
+            version: 3,
+            ..older
+        };
+        assert!(slot_supersedes(&newer, &cached));
     }
 
     #[test]

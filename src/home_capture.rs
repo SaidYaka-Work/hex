@@ -7,7 +7,7 @@
 //! another process can light the orb.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 #[cfg(not(test))]
 use std::time::{Duration, Instant};
 
@@ -18,16 +18,27 @@ pub(crate) enum HomeRequest {
 }
 
 static QUEUE: Mutex<Vec<HomeRequest>> = Mutex::new(Vec::new());
+static HOME_ORIGIN: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicU8 = AtomicU8::new(0);
 static LEVEL: AtomicU32 = AtomicU32::new(0);
 #[cfg(not(test))]
 static LAST_LEVEL_WRITE: Mutex<Option<Instant>> = Mutex::new(None);
 
 pub(crate) fn request(kind: HomeRequest) {
+    HOME_ORIGIN.store(true, Ordering::Release);
     QUEUE
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .push(kind);
+}
+
+/// A physical shortcut started this capture, so paste may leave the window.
+pub(crate) fn note_hotkey_origin() {
+    HOME_ORIGIN.store(false, Ordering::Release);
+}
+
+pub(crate) fn from_home_click() -> bool {
+    HOME_ORIGIN.load(Ordering::Acquire)
 }
 
 pub(crate) fn take() -> Vec<HomeRequest> {

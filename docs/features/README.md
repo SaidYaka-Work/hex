@@ -36,32 +36,39 @@ a model or provider.
 Remote config (`SAID_AI_CONFIG_URL`, cached as `ai-slot.json`) may change
 `base_url` and `model` only. The host must be `generativelanguage.googleapis.com`,
 `openrouter.ai`, or the placeholder `ai.saidyaka.com`, with no port and no
-userinfo, and the document must carry an ed25519 signature under the public
-key baked into the app. Remote config cannot change `key_variable`. An
-unsigned, invalid, or off-list document is ignored, and the cache is checked
-with the same rules. `SAID_AI_BASE_URL` must also be allowlisted.
-`SAID_AI_KEY_VARIABLE` is a local override and is never taken from the
-network. The matching private key is not in this repo, so a remote document
-stays ignored until the owner replaces the public key and signs one. A proxy
-at `ai.saidyaka.com` is the planned place that would hold the key and the
-model id. It is not deployed.
+userinfo. The signed slot carries a version, `issued_at`, and `expires_at`.
+The signature covers those fields plus the base URL and model. An expired
+slot, or one older than the cached slot, is rejected. The key variable is
+not in the document: each allowlisted host maps to one baked environment
+variable (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, or `SAID_AI_API_KEY`).
+There is no `SAID_AI_KEY_VARIABLE` override. An unsigned, invalid, or
+off-list document is ignored, and the cache is checked with the same rules.
+`SAID_AI_BASE_URL` must also be allowlisted. The matching private key is not
+in this repo, so a remote document stays ignored until the owner replaces
+the public key and signs one. A proxy at `ai.saidyaka.com` is the planned
+place that would hold the key and the model id. It is not deployed.
 
 The model sees the spoken request and any selected text, never the last Talk
 transcript. An utterance that is only an instruction updates the chip and
-pastes nothing. The cloud notice is on screen before the first Talk to AI
-send, and Continue is what allows that send. If the focused window cannot be
-confirmed (Wayland, a failed read, or Windows with no foreground process), the
-result is copied to the clipboard and a notice is shown instead of a
-keystroke. `max_tokens` is about three times the estimated input, with a floor
-of 1500. A provider that rejects JSON mode is retried once without
-`response_format`. Whether a key is present is an environment read and does
-not wait on a config fetch. `HEX_HOME_STAGE` exists only in debug builds, for
-screenshots.
+pastes nothing. A one-off instruction with no selection is stored for the
+session. The cloud notice is on screen before the first Talk to AI send, and
+Continue is what allows that send. The instruction file is re-read when its
+mtime or length changes, so Continue and chips reach a separate settings
+process. If Talk to AI finishes while the notice is still outstanding and
+the window is closed, the HUD says to open Said.ai and the settings process
+is started when its heartbeat is stale. If Said.ai itself is frontmost, or
+focus moved before the result arrived, the text is copied and the window
+says it can be pasted anywhere. An unreadable focus still copies, with the
+existing notice. `max_tokens` is about three times the estimated input, with
+a floor of 1500. A provider that rejects JSON mode is retried once without
+`response_format`. Whether a key is present is an environment read of the
+host's variable and does not wait on a config fetch. `HEX_HOME_STAGE` exists
+only in debug builds, for screenshots.
 
-A missing key shows "AI unavailable right now". Ordinary Talk to AI speech is
-rewritten with the active instructions and pasted. "for now" and "always"
-store chips; "always" adds to saved preferences. Talk dictation is unchanged
-by those chips. History retention, voice commands, and mode processing are
+A missing key shows a terracotta dot and "Set up AI". Ordinary Talk to AI
+speech is rewritten with the active instructions and pasted. "for now" and
+"always" store chips; "always" adds to saved preferences. Talk dictation is
+unchanged by those chips. History retention, voice commands, and mode processing are
 forced off on load. Saved mode text is kept and not applied. History,
 Commands, and Modes are not in the window and have no hotkeys. Transcription
 is pinned to the one local English model, including the first-run download,

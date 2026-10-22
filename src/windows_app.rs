@@ -269,6 +269,10 @@ pub fn open(event_path: PathBuf, shutdown: &'static AtomicBool, start_hidden: bo
         cx.spawn(async move |cx| {
             loop {
                 Timer::after(Duration::from_millis(250)).await;
+                if crate::output_instructions::take_home_reveal() {
+                    set_window_visible(hwnd, true);
+                    let _ = window.update(cx, |_, window, _| window.activate_window());
+                }
                 while let Ok(command) = tray_commands.try_recv() {
                     match command {
                         TrayCommand::Show => {

@@ -233,12 +233,17 @@ pub fn run_with_transcriber(
                         Arc::clone(&worker_cancel),
                     ),
                     OutputJob::DeferredPaste(text) => {
-                        let result = paster
-                            .as_mut()
-                            .map_err(|error| format!("{error:#}"))
-                            .and_then(|paster| {
-                                paster.paste(&text).map_err(|error| format!("{error:#}"))
-                            });
+                        let result =
+                            if crate::output_instructions::copy_for_self(&text, &windows_focus()) {
+                                Ok(())
+                            } else {
+                                paster
+                                    .as_mut()
+                                    .map_err(|error| format!("{error:#}"))
+                                    .and_then(|paster| {
+                                        paster.paste(&text).map_err(|error| format!("{error:#}"))
+                                    })
+                            };
                         JobResult {
                             kind: OutputKind::VoiceAction,
                             text: result.as_ref().ok().map(|_| text),
@@ -402,6 +407,7 @@ pub fn run_with_transcriber(
             let occurred_at = event.occurred_at(captured_through);
             match event.action {
                 HotkeyAction::Start if !recording && audio_ready => {
+                    crate::home_capture::note_hotkey_origin();
                     ai_cancel.store(false, Ordering::Release);
                     crate::output_instructions::clear_inflight_cancel();
                     capture.start_at(occurred_at);
@@ -439,6 +445,7 @@ pub fn run_with_transcriber(
                     emit_state(&mut events, VoiceState::Dictating, &device_label)?;
                 }
                 HotkeyAction::VoiceStart if !recording && audio_ready => {
+                    crate::home_capture::note_hotkey_origin();
                     ai_cancel.store(false, Ordering::Release);
                     crate::output_instructions::clear_inflight_cancel();
                     capture.start_at(occurred_at);
@@ -885,11 +892,13 @@ fn process_dictation_job(
         if text.trim().is_empty() {
             return Err("text replacements produced empty output".into());
         }
-        paster
-            .as_mut()
-            .map_err(|error| format!("{error:#}"))?
-            .paste(&text)
-            .map_err(|error| format!("{error:#}"))?;
+        if !crate::output_instructions::copy_for_self(&text, &windows_focus()) {
+            paster
+                .as_mut()
+                .map_err(|error| format!("{error:#}"))?
+                .paste(&text)
+                .map_err(|error| format!("{error:#}"))?;
+        }
         *last_dictation
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = Some(text.clone());

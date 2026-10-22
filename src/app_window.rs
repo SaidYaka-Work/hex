@@ -5,11 +5,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, AnyView, App, Bounds, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
-    IntoElement, KeyDownEvent, Modifiers as GpuiModifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, PathPromptOptions, Pixels, Point, Render, SharedString, StyleRefinement,
-    Subscription, Timer, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowHandle,
-    WindowOptions, actions, deferred, div, img, prelude::*, px, rgb, size,
+    Animation, AnimationExt, AnyElement, AnyView, App, Bounds, Context, Div, Entity, FocusHandle,
+    Focusable, FontWeight, IntoElement, KeyDownEvent, Modifiers as GpuiModifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, Render,
+    SharedString, StyleRefinement, Subscription, Timer, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowHandle, WindowOptions, actions, deferred, div, ease_in_out, img,
+    prelude::*, px, rgb, size,
 };
 
 use crate::app_settings::{
@@ -27,16 +28,17 @@ use crate::desktop_transcription_picker::{
     transcription_selection_is_active,
 };
 use crate::desktop_ui::{
-    ButtonKind, Icon, NavigationIcon, OrbMood, Tone, action_card, busy_label, button,
-    danger_menu_item, detail_body, detail_header, detail_placeholder, detail_row, detail_title,
-    disclosure_button, disclosure_frame, dropdown_menu_with_progress, error_message, error_panel,
-    home_mic_icon, home_sparkle_icon, hotkey_keycaps, icon, icon_button, inline_error,
-    instruction_chip, list_row, list_row_meta, list_row_title, listener_status, menu_item,
-    menu_with_progress, mix_color, navigation_item, pane_body, pane_content, pane_detail,
-    pane_header, pane_header_with_action, pane_list, pane_scroll_body, panel, panel_header,
-    progress_track, section_label, settings_copy, settings_row, settings_section_label,
-    sidebar_frame, sliding_segmented_control, sliding_segmented_for, sliding_segmented_item,
-    small_button, status_dot, status_pill, tag, toggle, truncated_line, voice_orb, window_frame,
+    ButtonKind, CardFill, Icon, NavigationIcon, OrbMood, Tone, action_card, busy_label, button,
+    compact_keycaps, danger_menu_item, detail_body, detail_header, detail_placeholder, detail_row,
+    detail_title, disclosure_button, disclosure_frame, dropdown_menu_with_progress, error_message,
+    error_panel, home_mic_icon, home_sparkle_icon, hotkey_keycaps, icon, icon_button, inline_error,
+    instruction_chip, large_button, list_row, list_row_meta, list_row_title, listener_status,
+    menu_item, menu_with_progress, mix_color, navigation_item, pane_body, pane_content,
+    pane_detail, pane_header, pane_header_with_action, pane_list, pane_scroll_body, panel,
+    panel_header, progress_track, section_label, settings_copy, settings_row,
+    settings_section_label, sidebar_frame, sliding_segmented_control, sliding_segmented_for,
+    sliding_segmented_item, small_button, status_dot, tag, toggle, truncated_line, voice_orb,
+    voice_orb_compact, window_frame,
 };
 use crate::developer_control::DeveloperPane;
 use crate::dictation_processor::{ModelCatalog, ModelChoice};
@@ -1345,6 +1347,9 @@ impl AppWindow {
                         let personal_workspace_changed = window.poll_personal_workspace();
                         window.ensure_parakeet();
                         let history_changed = window.poll_history(cx);
+                        if window.uses_simplified_home() {
+                            crate::output_instructions::touch_window_heartbeat();
+                        }
                         let instructions_changed = window.poll_instructions();
                         let platform_changed = window.poll_platform(cx);
                         let hex_mic_changed = window.poll_hex_microphone(cx);
@@ -7531,7 +7536,8 @@ impl AppWindow {
         let capture = crate::home_capture::active();
         let listening_talk =
             stage == "listening" || matches!(capture, Some(crate::home_capture::HomeRequest::Talk));
-        let listening_ai = matches!(capture, Some(crate::home_capture::HomeRequest::TalkToAi));
+        let listening_ai = stage == "listening-ai"
+            || matches!(capture, Some(crate::home_capture::HomeRequest::TalkToAi));
         let thinking = stage == "thinking" || crate::llm_backend::is_thinking();
         let listening = listening_talk || listening_ai;
         let mood = if thinking {
@@ -7541,27 +7547,42 @@ impl AppWindow {
         } else {
             OrbMood::Idle
         };
-        let level = if stage == "listening" {
+        let level = if stage == "listening" || stage == "listening-ai" {
             0.62
         } else {
             crate::home_capture::level()
         };
-        let talk_emphasis = window.spring_when("talk-card", listening_talk, SPRING_SNAP);
-        let ai_emphasis = window.spring_when("ai-card", listening_ai || thinking, SPRING_SNAP);
+        let talk_emphasis = window.spring_when("talk-card", listening_talk, SPRING_QUICK);
+        let ai_emphasis = window.spring_when("ai-card", listening_ai, SPRING_QUICK);
+        let talk_fill = if listening_talk || talk_emphasis > 0.01 {
+            CardFill::Talk
+        } else {
+            CardFill::Rest
+        };
+        let ai_fill = if listening_ai || ai_emphasis > 0.01 {
+            CardFill::Ai
+        } else {
+            CardFill::Rest
+        };
         let talk_hint = if listening_talk {
-            tr("Click again to finish.").to_string()
+            home_hint_line(tr("Click again to finish."))
         } else {
-            hotkey_label(&self.settings.dictation_hotkey)
+            home_keycaps(&self.settings.dictation_hotkey)
         };
-        let ai_hint = if listening_ai || thinking {
-            tr("Click again to finish.").to_string()
+        let ai_hint = if listening_ai {
+            home_hint_line(tr("Click again to finish."))
         } else {
-            hotkey_label(&self.settings.edit_hotkey)
+            home_keycaps(&self.settings.edit_hotkey)
         };
-        let show_cloud = crate::output_instructions::cloud_notice_outstanding()
-            && stage == "idle"
-            && !listening
-            && !thinking;
+        let ai_subtitle = if thinking {
+            tr("Thinking…")
+        } else {
+            tr("Sent to our AI service")
+        };
+        let outstanding = crate::output_instructions::cloud_notice_outstanding();
+        let show_cloud =
+            stage == "notice" || (stage == "live" && outstanding && !listening && !thinking);
+        let show_try = active.is_empty() && !show_cloud && !listening && !thinking;
         div()
             .size_full()
             .flex()
@@ -7569,7 +7590,8 @@ impl AppWindow {
             .bg(rgb(paint(CANVAS)))
             .child(
                 div()
-                    .w_full()
+                    .flex_none()
+                    .w(px(HOME_WINDOW_WIDTH))
                     .px_4()
                     .pt_4()
                     .flex()
@@ -7577,88 +7599,94 @@ impl AppWindow {
                     .justify_between()
                     .child(div().when(!crate::llm_backend::api_key_present(), |row| {
                         row.child(
-                            status_pill(tr("AI unavailable right now"))
-                                .debug_selector(|| "ai-not-configured".into()),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .debug_selector(|| "ai-not-configured".into())
+                                .child(status_dot(paint(ACCENT)))
+                                .child(
+                                    div()
+                                        .text_caption()
+                                        .text_color(rgb(paint(TEXT_SECONDARY)))
+                                        .child(tr("Set up AI")),
+                                ),
                         )
                     }))
+                    .child(div().flex_1())
                     .child(
                         icon_button(ButtonKind::Ghost, Icon::Settings)
                             .id("home-settings")
                             .debug_selector(|| "home-settings".into())
+                            .ml_auto()
                             .on_click(cx.listener(|this, _, _, cx| this.show_settings(cx))),
                     ),
             )
             .child(
                 div()
                     .flex_1()
+                    .min_h(px(0.0))
                     .w_full()
                     .px_4()
                     .pb_4()
                     .flex()
                     .flex_col()
                     .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .child(voice_orb(mood, level))
+                    .when(show_cloud, |column| {
+                        column.overflow_hidden().justify_start().gap_2().pt_2()
+                    })
+                    .when(!show_cloud, |column| column.justify_center().gap_3())
+                    .child(if show_cloud {
+                        voice_orb_compact(mood, level)
+                    } else {
+                        voice_orb(mood, level)
+                    })
                     .child(div().text_display().child("Said.ai"))
                     .child(
                         div()
-                            .relative()
                             .w_full()
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top(px(-28.0))
-                                    .w_full()
-                                    .h(px(180.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        div()
-                                            .size(px(280.0))
-                                            .rounded_full()
-                                            .bg(gpui::rgba((paint(ACCENT) << 8) | 0x12)),
-                                    )
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .size(px(150.0))
-                                            .rounded_full()
-                                            .bg(gpui::rgba((paint(ORB_WARM) << 8) | 0x24)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .gap_3()
-                                    .child(home_card(
-                                        true,
-                                        talk_emphasis,
-                                        false,
-                                        tr("Talk"),
-                                        tr("Stays on this computer"),
-                                        talk_hint,
-                                        "talk",
-                                        "talk-button",
-                                        cx.listener(|this, _, _, cx| this.activate_talk(cx)),
-                                    ))
-                                    .child(home_card(
-                                        false,
-                                        ai_emphasis,
-                                        true,
-                                        tr("Talk to AI"),
-                                        tr("Sent to our AI service"),
-                                        ai_hint,
-                                        "talk-to-ai",
-                                        "talk-to-ai-button",
-                                        cx.listener(|this, _, _, cx| this.activate_talk_to_ai(cx)),
-                                    )),
-                            ),
+                            .flex()
+                            .gap_3()
+                            .child(home_card(
+                                talk_fill,
+                                talk_emphasis,
+                                false,
+                                false,
+                                tr("Talk"),
+                                tr("Stays on this computer"),
+                                talk_hint,
+                                "talk",
+                                "talk-button",
+                                cx.listener(|this, _, _, cx| this.activate_talk(cx)),
+                            ))
+                            .child(home_card(
+                                ai_fill,
+                                ai_emphasis,
+                                true,
+                                thinking,
+                                tr("Talk to AI"),
+                                ai_subtitle,
+                                ai_hint,
+                                "talk-to-ai",
+                                "talk-to-ai-button",
+                                cx.listener(|this, _, _, cx| this.activate_talk_to_ai(cx)),
+                            )),
                     )
-                    .when(!(show_cloud && active.is_empty()), |column| {
+                    .when(!active.is_empty(), |column| {
                         column.child(render_active_instructions(&active, stage != "chips", cx))
+                    })
+                    .when(show_try, |column| {
+                        column.child(
+                            div().w_full().flex().gap_3().child(div().flex_1()).child(
+                                div().flex_1().flex().justify_center().child(
+                                    div()
+                                        .text_caption()
+                                        .text_color(rgb(paint(TEXT_TERTIARY)))
+                                        .text_center()
+                                        .child(tr("Try: \"for now, write formally\"")),
+                                ),
+                            ),
+                        )
                     })
                     .when(downloading, |column| {
                         column.child(
@@ -7686,24 +7714,25 @@ impl AppWindow {
                     })
                     .when(show_cloud, |column| {
                         column.child(
-                            div()
-                                .w_full()
+                            panel()
+                                .p_4()
                                 .flex()
                                 .flex_col()
-                                .items_center()
-                                .gap_2()
+                                .gap_3()
+                                .shadow_lg()
                                 .child(
                                     div()
-                                        .text_footnote()
+                                        .text_body()
                                         .text_color(rgb(paint(TEXT_SECONDARY)))
-                                        .text_center()
                                         .child(tr(
                                             "Talk to AI sends what you say, and any selected text, to our AI service.",
                                         )),
                                 )
                                 .child(
-                                    button(ButtonKind::Secondary, tr("Continue"))
+                                    large_button(ButtonKind::Primary, tr("Continue"))
                                         .id("cloud-notice-continue")
+                                        .w_full()
+                                        .justify_center()
                                         .on_click(cx.listener(|_, _, _, cx| {
                                             crate::output_instructions::acknowledge_cloud_notice();
                                             cx.notify();
@@ -7909,90 +7938,123 @@ impl AppWindow {
 }
 
 fn home_stage() -> &'static str {
-    // Screenshot staging stays out of release builds.
+    // Screenshot staging stays out of release builds. An unset variable follows
+    // the live window, including the cloud notice.
     #[cfg(debug_assertions)]
     {
-        match std::env::var("HEX_HOME_STAGE") {
-            Ok(value) if value == "listening" => return "listening",
-            Ok(value) if value == "thinking" => return "thinking",
-            Ok(value) if value == "chips" => return "chips",
-            _ => {}
+        if let Ok(stage) = std::env::var("HEX_HOME_STAGE") {
+            return match stage.as_str() {
+                "listening" => "listening",
+                "listening-ai" => "listening-ai",
+                "thinking" => "thinking",
+                "chips" => "chips",
+                "notice" => "notice",
+                "idle" => "idle",
+                _ => "live",
+            };
         }
     }
-    "idle"
+    "live"
+}
+
+fn home_hint_line(text: &str) -> AnyElement {
+    div()
+        .text_caption()
+        .text_color(rgb(paint(TEXT_TERTIARY)))
+        .text_center()
+        .child(text.to_string())
+        .into_any_element()
+}
+
+fn home_keycaps(binding: &crate::app_settings::HotkeyBinding) -> AnyElement {
+    let parts = binding.keycaps();
+    if parts.is_empty() {
+        home_hint_line(tr("the shortcut"))
+    } else {
+        compact_keycaps(parts)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn home_card(
-    filled: bool,
+    fill: CardFill,
     emphasis: f32,
     sparkle: bool,
+    shimmer: bool,
     title: impl IntoElement,
     subtitle: impl IntoElement,
-    hint: impl IntoElement,
+    hint: AnyElement,
     id: &'static str,
     selector: &'static str,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let icon_color = if filled {
-        paint(ON_ACCENT)
-    } else {
-        paint(TEXT_SECONDARY)
+    let live = emphasis >= 0.45;
+    let icon_color = match fill {
+        CardFill::Talk if live => paint(ON_ACCENT),
+        CardFill::Ai if live => paint(ACCENT),
+        _ => paint(TEXT_SECONDARY),
     };
-    let subtitle_color = if filled {
-        paint(ON_ACCENT)
-    } else {
-        paint(TEXT_TERTIARY)
+    let subtitle_color = match fill {
+        CardFill::Talk if live => paint(ON_ACCENT),
+        _ if shimmer => paint(TEXT_SECONDARY),
+        _ => paint(TEXT_TERTIARY),
     };
     let glyph = if sparkle {
         home_sparkle_icon(icon_color)
     } else {
         home_mic_icon(icon_color)
     };
+    let card = action_card(fill, emphasis)
+        .id(id)
+        .debug_selector(move || selector.into())
+        .active(move |card| {
+            card.bg(if fill == CardFill::Talk && live {
+                mix_color(rgb(paint(ACCENT)), rgb(paint(ACCENT_TEXT)), 0.22)
+            } else {
+                rgb(paint(SURFACE_HOVER))
+            })
+        })
+        .on_click(on_click)
+        .child(glyph)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_headline().child(title))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(rgb(subtitle_color))
+                        .child(subtitle),
+                ),
+        );
+    let card = if shimmer && !crate::motion::reduced_motion() {
+        card.with_animation(
+            "ai-thinking-shimmer",
+            Animation::new(Duration::from_millis(900))
+                .repeat()
+                .with_easing(ease_in_out),
+            |card, phase| {
+                let wave = if phase < 0.5 {
+                    phase * 2.0
+                } else {
+                    (1.0 - phase) * 2.0
+                };
+                card.opacity(0.55 + (0.45 * wave))
+            },
+        )
+        .into_any_element()
+    } else {
+        card.into_any_element()
+    };
     div()
         .flex_1()
         .flex()
         .flex_col()
         .gap_2()
-        .child(
-            action_card(filled, emphasis)
-                .id(id)
-                .debug_selector(move || selector.into())
-                .active(|card| {
-                    card.bg(if filled {
-                        mix_color(rgb(paint(ACCENT)), rgb(paint(ACCENT_TEXT)), 0.22)
-                    } else {
-                        rgb(paint(ACCENT_SURFACE))
-                    })
-                })
-                .on_click(on_click)
-                .child(glyph)
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_body()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_caption()
-                                .text_color(rgb(subtitle_color))
-                                .child(subtitle),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .text_caption()
-                .text_color(rgb(paint(TEXT_TERTIARY)))
-                .text_center()
-                .child(hint),
-        )
+        .child(card)
+        .child(hint)
 }
 
 fn render_active_instructions(
@@ -8007,14 +8069,6 @@ fn render_active_instructions(
         .justify_center()
         .gap_2()
         .debug_selector(|| "active-instructions".into())
-        .when(active.is_empty(), |row| {
-            row.child(
-                div()
-                    .text_caption()
-                    .text_color(rgb(paint(TEXT_TERTIARY)))
-                    .child(tr("Try: \"for now, write formally\"")),
-            )
-        })
         .children(active.iter().enumerate().map(|(index, item)| {
             let scope = item.scope;
             let text = item.text.clone();
@@ -8022,7 +8076,8 @@ fn render_active_instructions(
                 crate::output_instructions::InstructionScope::Session => tr("for now"),
                 crate::output_instructions::InstructionScope::Persistent => tr("always"),
             };
-            instruction_chip(format!("{text} · {when}")).child(
+            let motion_id = SharedString::from(format!("chip-enter-{text}"));
+            let chip = instruction_chip(format!("{text} · {when}")).child(
                 icon_button(ButtonKind::Ghost, Icon::Close)
                     .id(SharedString::from(format!("instruction-chip-{index}")))
                     .on_click(cx.listener(move |_, _, _, cx| {
@@ -8031,17 +8086,18 @@ fn render_active_instructions(
                         }
                         cx.notify();
                     })),
-            )
+            );
+            if crate::motion::reduced_motion() {
+                chip.into_any_element()
+            } else {
+                chip.with_animation(
+                    motion_id,
+                    Animation::new(Duration::from_millis(150)).with_easing(ease_in_out),
+                    |chip, delta| chip.opacity(delta),
+                )
+                .into_any_element()
+            }
         }))
-}
-
-fn hotkey_label(binding: &crate::app_settings::HotkeyBinding) -> String {
-    let label = binding.keycaps().join(" + ");
-    if label.is_empty() {
-        tr("the shortcut").into()
-    } else {
-        label
-    }
 }
 
 impl Render for AppWindow {

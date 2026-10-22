@@ -40,7 +40,7 @@ jobs:
             libxcursor-dev libxi-dev libxrandr-dev libopenblas-dev libvulkan-dev \
             glslc libshaderc-dev
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --bin voice-control
 
   macos:
@@ -51,10 +51,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
       - name: Install the Metal toolchain
         run: xcrun --sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --bin voice-control --tests -- -D warnings
+      - run: cargo test --locked --bin voice-control
       - run: cargo check --locked --bin voice-control
-      - run: cargo build --locked --bin voice-control

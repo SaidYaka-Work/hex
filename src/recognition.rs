@@ -1720,6 +1720,7 @@ fn handle_hotkey_action(
 ) -> Result<bool> {
     match action {
         HotkeyAction::Start => {
+            crate::home_capture::note_hotkey_origin();
             crate::output_instructions::clear_inflight_cancel();
             if !dictation.start(action_at)? {
                 return Ok(false);
@@ -1823,6 +1824,7 @@ fn handle_edit_hotkey_action(
 ) -> Result<bool> {
     match action {
         HotkeyAction::Start => {
+            crate::home_capture::note_hotkey_origin();
             crate::output_instructions::clear_inflight_cancel();
             if !admit_voice_action(true, edit_context, || {
                 dictation.cancel()?;

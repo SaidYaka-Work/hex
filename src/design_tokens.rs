@@ -147,7 +147,7 @@ const DARK_TEXT_SECONDARY: u32 = 0xd5cec2;
 const DARK_TEXT_TERTIARY: u32 = 0xb7aea0;
 const DARK_TEXT_DISABLED: u32 = 0x7d756a;
 const DARK_ACCENT: u32 = 0xe8a87c;
-const DARK_ON_ACCENT: u32 = 0x161613;
+const DARK_ON_ACCENT: u32 = 0x161412;
 const DARK_ACCENT_TEXT: u32 = 0xe8a87c;
 const DARK_ACCENT_SURFACE: u32 = 0x2a1a12;
 const DARK_ACCENT_BORDER: u32 = 0x6b4632;
@@ -342,7 +342,12 @@ pub(crate) const HOME_WINDOW_HEIGHT: f32 = 560.0;
 pub(crate) const ORB_SIZE: f32 = 72.0;
 pub(crate) const ORB_GLOW: f32 = 168.0;
 /// A home action card.
-pub(crate) const ACTION_CARD_HEIGHT: f32 = 116.0;
+pub(crate) const ACTION_CARD_HEIGHT: f32 = 120.0;
+/// Mic and sparkle on the home cards.
+pub(crate) const HOME_ICON_SIZE: f32 = 24.0;
+/// Small shortcut caps under a home card.
+pub(crate) const HOME_KEYCAP_HEIGHT: f32 = 18.0;
+pub(crate) const HOME_KEYCAP_MIN: f32 = 22.0;
 /// The settings sheet on the home. It fits inside [`HOME_WINDOW_WIDTH`].
 pub(crate) const SETTINGS_SHEET: f32 = 400.0;
 /// Tallest the sheet grows before its body scrolls, inside the home window.
@@ -412,6 +417,7 @@ pub(crate) const STEP_DOT_ACTIVE_WIDTH: f32 = 16.0;
 pub(crate) use crate::motion::Spec as SpringSpec;
 #[allow(dead_code)]
 pub(crate) const SPRING_INSTANT: SpringSpec = crate::motion::presets::INSTANT;
+pub(crate) const SPRING_QUICK: SpringSpec = crate::motion::presets::QUICK;
 pub(crate) const SPRING_SNAP: SpringSpec = crate::motion::presets::SNAP;
 #[allow(dead_code)]
 pub(crate) const SPRING_SNAP_EXIT: SpringSpec = crate::motion::presets::SNAP_EXIT;

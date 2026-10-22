@@ -512,7 +512,9 @@ fn run_output_worker(
             continue;
         }
         if let OutputJob::InstructionPaste { text } = job {
-            if !text.trim().is_empty() {
+            if !text.trim().is_empty()
+                && !crate::output_instructions::copy_for_self(&text, &current_focus())
+            {
                 let commit = || true;
                 let _ = paster.paste(&text, PasteMode::Standalone, &commit);
             }
@@ -916,21 +918,32 @@ fn finish_output(
                 let paste_started = Instant::now();
                 if !completed.text.trim().is_empty() {
                     let commit = || control.begin_output();
-                    match target {
-                        TranscriptionTarget::Paste => {
-                            paste(&completed.text, PasteMode::Continue, &commit)
+                    let copied = matches!(
+                        target,
+                        TranscriptionTarget::Paste
+                            | TranscriptionTarget::Send
+                            | TranscriptionTarget::VoiceAction
+                    ) && crate::output_instructions::copy_for_self(
+                        &completed.text,
+                        &current_focus(),
+                    );
+                    if !copied {
+                        match target {
+                            TranscriptionTarget::Paste => {
+                                paste(&completed.text, PasteMode::Continue, &commit)
+                            }
+                            TranscriptionTarget::Send => {
+                                paste(&completed.text, PasteMode::Send, &commit)
+                            }
+                            TranscriptionTarget::VoiceAction => {
+                                paste(&completed.text, PasteMode::Standalone, &commit)
+                            }
+                            TranscriptionTarget::Service => commit()
+                                .then_some(())
+                                .ok_or_else(|| eyre!("dictation was cancelled")),
                         }
-                        TranscriptionTarget::Send => {
-                            paste(&completed.text, PasteMode::Send, &commit)
-                        }
-                        TranscriptionTarget::VoiceAction => {
-                            paste(&completed.text, PasteMode::Standalone, &commit)
-                        }
-                        TranscriptionTarget::Service => commit()
-                            .then_some(())
-                            .ok_or_else(|| eyre!("dictation was cancelled")),
+                        .map_err(|error| error.to_string())?;
                     }
-                    .map_err(|error| error.to_string())?;
                     if matches!(
                         target,
                         TranscriptionTarget::Paste | TranscriptionTarget::Send

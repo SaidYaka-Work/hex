@@ -24,14 +24,17 @@ enum IndicatorState {
     Recording,
     Processing,
     Thinking,
+    Notice,
 }
 
 impl IndicatorState {
-    fn for_capture(recording: bool, pending: usize, thinking: bool) -> Self {
+    fn for_capture(recording: bool, pending: usize, thinking: bool, notice: bool) -> Self {
         if recording {
             Self::Recording
         } else if thinking {
             Self::Thinking
+        } else if notice {
+            Self::Notice
         } else if pending > 0 {
             Self::Processing
         } else {
@@ -154,7 +157,14 @@ impl LinuxIndicator {
         });
         Self { generation }
     }
-    pub(crate) fn update(&self, recording: bool, pending: usize, thinking: bool, caption: &str) {
+    pub(crate) fn update(
+        &self,
+        recording: bool,
+        pending: usize,
+        thinking: bool,
+        notice: bool,
+        caption: &str,
+    ) {
         if let Some(generation) = self.generation {
             runtime()
                 .state
@@ -163,7 +173,7 @@ impl LinuxIndicator {
                 .indicator
                 .set(
                     generation,
-                    IndicatorState::for_capture(recording, pending, thinking),
+                    IndicatorState::for_capture(recording, pending, thinking, notice),
                     caption,
                 );
         }
@@ -172,7 +182,7 @@ impl LinuxIndicator {
 
 impl Drop for LinuxIndicator {
     fn drop(&mut self) {
-        self.update(false, 0, false, "");
+        self.update(false, 0, false, false, "");
     }
 }
 
@@ -211,12 +221,15 @@ fn run(state: &Mutex<State>, stop: &AtomicBool) -> Result<()> {
                     IndicatorState::Hidden => window.hide(),
                     IndicatorState::Recording
                     | IndicatorState::Processing
-                    | IndicatorState::Thinking => {
+                    | IndicatorState::Thinking
+                    | IndicatorState::Notice => {
                         let fallback =
                             crate::desktop_i18n::tr(if desired == IndicatorState::Recording {
                                 "Recording"
                             } else if desired == IndicatorState::Thinking {
                                 "Thinking"
+                            } else if desired == IndicatorState::Notice {
+                                "Open Said.ai to continue"
                             } else {
                                 "Transcribing"
                             });
@@ -328,19 +341,23 @@ mod tests {
     #[test]
     fn hud_remains_visible_until_all_output_finishes() {
         assert_eq!(
-            IndicatorState::for_capture(true, 2, false),
+            IndicatorState::for_capture(true, 2, false, false),
             IndicatorState::Recording
         );
         assert_eq!(
-            IndicatorState::for_capture(false, 2, false),
+            IndicatorState::for_capture(false, 2, false, false),
             IndicatorState::Processing
         );
         assert_eq!(
-            IndicatorState::for_capture(false, 0, true),
+            IndicatorState::for_capture(false, 0, true, false),
             IndicatorState::Thinking
         );
         assert_eq!(
-            IndicatorState::for_capture(false, 0, false),
+            IndicatorState::for_capture(false, 0, false, true),
+            IndicatorState::Notice
+        );
+        assert_eq!(
+            IndicatorState::for_capture(false, 0, false, false),
             IndicatorState::Hidden
         );
     }
