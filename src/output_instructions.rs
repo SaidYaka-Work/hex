@@ -713,7 +713,7 @@ pub fn touch_window_heartbeat() {
     }
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn window_heartbeat_fresh() -> bool {
     #[cfg(test)]
     {
